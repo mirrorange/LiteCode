@@ -8,13 +8,13 @@
 **Goal**: 实现文件与搜索服务，以及 `Read`、`Write`、`Edit`、`Glob`、`Grep` 工具。
 **Success Criteria**: 支持文件读取/写入/精确替换、glob 匹配和内容搜索；遵守读后写/读后编辑约束；相关测试通过。
 **Tests**: 文件读写与编辑行为测试；glob/grep 输出测试；约束失败路径测试。
-**Status**: In Progress
+**Status**: Complete
 
 ## Stage 3: Process And Tasks
 **Goal**: 实现命令执行与后台任务管理，交付 `Bash`、`TaskOutput`、`TaskStop` 工具。
 **Success Criteria**: 前台/后台命令执行可用；任务状态可查询和停止；工作目录可跨命令持久化。
 **Tests**: Bash 前台执行测试；后台任务查询与停止测试；工作目录持久化测试。
-**Status**: Not Started
+**Status**: In Progress
 
 ## Stage 4: Notebook And Policy
 **Goal**: 实现 `NotebookEdit`，并补齐跨工具状态跟踪与约束校验。

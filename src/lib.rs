@@ -1,11 +1,10 @@
 pub mod cli;
 pub mod error;
+pub mod schema;
 pub mod server;
 pub mod services;
 pub mod tools;
 pub mod transport;
-
-use std::path::PathBuf;
 
 use crate::{cli::Transport, error::Result, server::LiteCodeServer};
 
@@ -30,8 +29,4 @@ fn init_tracing() {
         .with_target(false)
         .without_time()
         .try_init();
-}
-
-pub fn normalize_path(path: PathBuf) -> Result<PathBuf> {
-    Ok(path.canonicalize().unwrap_or(path))
 }

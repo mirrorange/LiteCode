@@ -4,12 +4,15 @@ use std::{
 };
 
 use rmcp::{
-    ServerHandler, tool_handler,
+    ServerHandler,
     handler::server::router::tool::ToolRouter,
     model::{Implementation, ServerCapabilities, ServerInfo, TasksCapability},
+    tool_handler,
 };
 
-use crate::services::{file_service::FileService, process::ProcessService, task_manager::TaskManager};
+use crate::services::{
+    file_service::FileService, process::ProcessService, task_manager::TaskManager,
+};
 
 #[derive(Clone)]
 pub struct LiteCodeServer {
