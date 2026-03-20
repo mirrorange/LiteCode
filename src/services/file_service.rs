@@ -1,14 +1,23 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Instant,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use globwalk::GlobWalkerBuilder;
+use grep::{
+    matcher::Matcher,
+    regex::{RegexMatcher, RegexMatcherBuilder},
+    searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch},
+};
+use ignore::{
+    WalkBuilder,
+    overrides::{Override, OverrideBuilder},
+    types::{Types, TypesBuilder},
+};
 use lopdf::Document;
-use tokio::process::Command;
 
 use crate::{
     error::{LiteCodeError, Result},
@@ -271,7 +280,9 @@ impl FileService {
             0
         };
 
-        let results = self.run_ripgrep(&target, &input, before, after).await?;
+        let results = self
+            .run_grep_search(&target, input.clone(), before, after)
+            .await?;
         let total_matches = results.total_matches;
 
         Ok(match mode {
@@ -509,62 +520,18 @@ impl FileService {
         Ok(target)
     }
 
-    async fn run_ripgrep(
+    async fn run_grep_search(
         &self,
         target: &Path,
-        input: &GrepInput,
+        input: GrepInput,
         before: usize,
         after: usize,
-    ) -> Result<RipgrepSearchResult> {
-        let mut command = Command::new("rg");
-        command.arg("--json");
-        command.args(["--color", "never"]);
-
-        if input.output_mode == GrepOutputMode::Content {
-            command.arg("-n");
-            if before > 0 {
-                command.arg("-B").arg(before.to_string());
-            }
-            if after > 0 {
-                command.arg("-A").arg(after.to_string());
-            }
-        }
-
-        if input.case_insensitive.unwrap_or(false) {
-            command.arg("-i");
-        }
-        if let Some(glob_pattern) = input.glob.as_deref() {
-            command.arg("--glob").arg(glob_pattern);
-        }
-        if let Some(file_type) = input.file_type.as_deref() {
-            command.arg("--type").arg(file_type);
-        }
-        if input.multiline {
-            command.args(["-U", "--multiline", "--multiline-dotall"]);
-        }
-
-        command.arg(&input.pattern);
-        command.arg(target);
-
-        let output = command.output().await.map_err(|error| {
-            LiteCodeError::internal(format!("Failed to execute ripgrep: {error}"))
-        })?;
-        let status = output.status.code().unwrap_or_default();
-        if status != 0 && status != 1 {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let message = if stderr.is_empty() {
-                "ripgrep search failed.".to_string()
-            } else {
-                format!("ripgrep search failed: {stderr}")
-            };
-            return Err(LiteCodeError::invalid_input(message));
-        }
-
-        parse_ripgrep_output(
-            &String::from_utf8_lossy(&output.stdout),
-            input.output_mode,
-            input.line_numbers.unwrap_or(true),
-        )
+    ) -> Result<GrepSearchResult> {
+        let target = target.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            run_grep_search_blocking(&target, &input, before, after)
+        })
+        .await?
     }
 
     fn mark_read(&self, path: &Path) {
@@ -805,139 +772,177 @@ fn build_structured_patch(original: &str, updated: &str) -> Vec<StructuredPatchH
     }]
 }
 
-fn parse_ripgrep_output(
-    stdout: &str,
-    mode: GrepOutputMode,
-    line_numbers: bool,
-) -> Result<RipgrepSearchResult> {
-    let mut matched_files = Vec::new();
-    let mut file_indexes = HashMap::new();
-    let mut match_counts = Vec::<usize>::new();
-    let mut content_lines = Vec::new();
-    let mut total_matches = 0usize;
+fn run_grep_search_blocking(
+    target: &Path,
+    input: &GrepInput,
+    before: usize,
+    after: usize,
+) -> Result<GrepSearchResult> {
+    let matcher = build_regex_matcher(input)?;
+    let overrides = build_override_matcher(target, input)?;
+    let types = build_type_matcher(input)?;
+    let search_paths = collect_search_paths(target, overrides.as_ref(), types.as_ref())?;
+    let include_line_numbers =
+        input.output_mode == GrepOutputMode::Content && input.line_numbers.unwrap_or(true);
+    let collect_content = input.output_mode == GrepOutputMode::Content;
+    let mut searcher = build_searcher(input, before, after, include_line_numbers);
+    let mut results = GrepSearchResult::default();
 
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let value = serde_json::from_str::<serde_json::Value>(line).map_err(|error| {
-            LiteCodeError::internal(format!("Failed to parse ripgrep JSON output: {error}"))
+    for path in search_paths {
+        let rendered_path = render_search_path(target, &path);
+        let mut sink = GrepSink::new(
+            rendered_path,
+            include_line_numbers,
+            collect_content,
+            &matcher,
+            &mut results,
+        );
+        searcher
+            .search_path(&matcher, &path, &mut sink)
+            .map_err(|error| {
+                LiteCodeError::internal(format!("Search failed for {}: {error}", path.display()))
+            })?;
+    }
+
+    Ok(results)
+}
+
+fn build_regex_matcher(input: &GrepInput) -> Result<RegexMatcher> {
+    let mut builder = RegexMatcherBuilder::new();
+    builder.case_insensitive(input.case_insensitive.unwrap_or(false));
+    builder.multi_line(input.multiline);
+    builder.dot_matches_new_line(input.multiline);
+    builder
+        .build(&input.pattern)
+        .map_err(|error| LiteCodeError::invalid_input(error.to_string()))
+}
+
+fn build_override_matcher(target: &Path, input: &GrepInput) -> Result<Option<Override>> {
+    let Some(glob_pattern) = input.glob.as_deref() else {
+        return Ok(None);
+    };
+
+    let root = override_root(target);
+    let mut builder = OverrideBuilder::new(root);
+    builder
+        .add(glob_pattern)
+        .map_err(|error| LiteCodeError::invalid_input(error.to_string()))?;
+    builder
+        .build()
+        .map(Some)
+        .map_err(|error| LiteCodeError::invalid_input(error.to_string()))
+}
+
+fn build_type_matcher(input: &GrepInput) -> Result<Option<Types>> {
+    let Some(file_type) = input.file_type.as_deref() else {
+        return Ok(None);
+    };
+
+    let mut builder = TypesBuilder::new();
+    builder.add_defaults();
+    builder.select(file_type);
+    builder
+        .build()
+        .map(Some)
+        .map_err(|error| LiteCodeError::invalid_input(error.to_string()))
+}
+
+fn collect_search_paths(
+    target: &Path,
+    overrides: Option<&Override>,
+    types: Option<&Types>,
+) -> Result<Vec<PathBuf>> {
+    if target.is_file() {
+        return Ok(if explicit_file_matches(target, overrides, types) {
+            vec![target.to_path_buf()]
+        } else {
+            Vec::new()
+        });
+    }
+
+    let mut builder = WalkBuilder::new(target);
+    if let Some(overrides) = overrides {
+        builder.overrides(overrides.clone());
+    }
+    if let Some(types) = types {
+        builder.types(types.clone());
+    }
+
+    let mut paths = Vec::new();
+    for entry in builder.build() {
+        let entry = entry.map_err(|error| {
+            LiteCodeError::internal(format!(
+                "Failed to traverse search path {}: {error}",
+                target.display()
+            ))
         })?;
-
-        match value.get("type").and_then(serde_json::Value::as_str) {
-            Some("match") => {
-                let Some(path) = ripgrep_path(&value) else {
-                    continue;
-                };
-                let file_index = match file_indexes.get(&path) {
-                    Some(index) => *index,
-                    None => {
-                        let index = matched_files.len();
-                        file_indexes.insert(path.clone(), index);
-                        matched_files.push(path.clone());
-                        match_counts.push(0);
-                        index
-                    }
-                };
-
-                let submatch_count = value
-                    .get("data")
-                    .and_then(|data| data.get("submatches"))
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| items.len().max(1))
-                    .unwrap_or(1);
-                match_counts[file_index] += submatch_count;
-
-                if mode == GrepOutputMode::Content {
-                    let line_text = ripgrep_lines_text(&value).unwrap_or_default();
-                    let line_number = value
-                        .get("data")
-                        .and_then(|data| data.get("line_number"))
-                        .and_then(serde_json::Value::as_u64)
-                        .and_then(|value| usize::try_from(value).ok());
-                    extend_rendered_lines(
-                        &mut content_lines,
-                        &path,
-                        &line_text,
-                        line_number,
-                        line_numbers,
-                    );
-                }
-            }
-            Some("context") if mode == GrepOutputMode::Content => {
-                let Some(path) = ripgrep_path(&value) else {
-                    continue;
-                };
-                let line_text = ripgrep_lines_text(&value).unwrap_or_default();
-                let line_number = value
-                    .get("data")
-                    .and_then(|data| data.get("line_number"))
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok());
-                extend_rendered_lines(
-                    &mut content_lines,
-                    &path,
-                    &line_text,
-                    line_number,
-                    line_numbers,
-                );
-            }
-            Some("summary") => {
-                total_matches = value
-                    .get("data")
-                    .and_then(|data| data.get("stats"))
-                    .and_then(|stats| stats.get("matches"))
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .unwrap_or(total_matches);
-            }
-            _ => {}
+        if !entry
+            .file_type()
+            .map(|file_type| file_type.is_file())
+            .unwrap_or(false)
+        {
+            continue;
         }
+        paths.push(entry.into_path());
     }
-
-    if total_matches == 0 {
-        total_matches = match_counts.iter().sum();
-    }
-
-    let match_counts = matched_files
-        .iter()
-        .cloned()
-        .zip(match_counts)
-        .collect::<HashMap<_, _>>();
-
-    Ok(RipgrepSearchResult {
-        matched_files,
-        match_counts,
-        content_lines,
-        total_matches,
-    })
+    Ok(paths)
 }
 
-fn ripgrep_path(value: &serde_json::Value) -> Option<String> {
-    value
-        .get("data")
-        .and_then(|data| data.get("path"))
-        .and_then(|path| path.get("text"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string)
+fn explicit_file_matches(path: &Path, overrides: Option<&Override>, types: Option<&Types>) -> bool {
+    if let Some(overrides) = overrides
+        && overrides.matched(path, false).is_ignore()
+    {
+        return false;
+    }
+    if let Some(types) = types
+        && types.matched(path, false).is_ignore()
+    {
+        return false;
+    }
+    true
 }
 
-fn ripgrep_lines_text(value: &serde_json::Value) -> Option<String> {
-    let lines = value.get("data")?.get("lines")?;
-    if let Some(text) = lines.get("text").and_then(serde_json::Value::as_str) {
-        return Some(text.to_string());
+fn override_root(target: &Path) -> &Path {
+    if target.is_dir() {
+        target
+    } else {
+        target.parent().unwrap_or(target)
     }
+}
 
-    lines
-        .get("bytes")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|encoded| {
-            STANDARD
-                .decode(encoded)
-                .ok()
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        })
+fn build_searcher(
+    input: &GrepInput,
+    before: usize,
+    after: usize,
+    include_line_numbers: bool,
+) -> Searcher {
+    let mut builder = SearcherBuilder::new();
+    builder.multi_line(input.multiline);
+    builder.line_number(include_line_numbers);
+    if input.output_mode == GrepOutputMode::Content {
+        builder.before_context(before);
+        builder.after_context(after);
+    }
+    builder.build()
+}
+
+fn render_search_path(target: &Path, path: &Path) -> String {
+    if target.is_file() {
+        path.display().to_string()
+    } else {
+        path.strip_prefix(target)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
+}
+
+fn to_usize_line_number(line_number: Option<u64>) -> Option<usize> {
+    line_number.and_then(|value| usize::try_from(value).ok())
 }
 
 fn extend_rendered_lines(
-    rendered: &mut Vec<RipgrepRenderedLine>,
+    rendered: &mut Vec<GrepRenderedLine>,
     path: &str,
     text: &str,
     line_number: Option<usize>,
@@ -955,7 +960,7 @@ fn extend_rendered_lines(
         } else {
             format!("{path}:{segment}")
         };
-        rendered.push(RipgrepRenderedLine {
+        rendered.push(GrepRenderedLine {
             path: path.to_string(),
             text,
         });
@@ -968,6 +973,98 @@ fn apply_window<T: Clone>(entries: &[T], offset: usize, limit: usize) -> Vec<T> 
         iter.cloned().collect()
     } else {
         iter.take(limit).cloned().collect()
+    }
+}
+
+impl GrepSearchResult {
+    fn record_match(&mut self, path: &str, count: usize) {
+        if !self.match_counts.contains_key(path) {
+            self.matched_files.push(path.to_string());
+            self.match_counts.insert(path.to_string(), 0);
+        }
+        if let Some(entry) = self.match_counts.get_mut(path) {
+            *entry += count;
+        }
+        self.total_matches += count;
+    }
+}
+
+struct GrepSink<'a, M> {
+    path: String,
+    include_line_numbers: bool,
+    collect_content: bool,
+    matcher: &'a M,
+    results: &'a mut GrepSearchResult,
+}
+
+impl<'a, M> GrepSink<'a, M> {
+    fn new(
+        path: String,
+        include_line_numbers: bool,
+        collect_content: bool,
+        matcher: &'a M,
+        results: &'a mut GrepSearchResult,
+    ) -> Self {
+        Self {
+            path,
+            include_line_numbers,
+            collect_content,
+            matcher,
+            results,
+        }
+    }
+}
+
+impl<M> Sink for GrepSink<'_, M>
+where
+    M: Matcher,
+    M::Error: std::fmt::Display,
+{
+    type Error = io::Error;
+
+    fn matched(
+        &mut self,
+        _searcher: &Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> std::result::Result<bool, Self::Error> {
+        let mut match_count = 0usize;
+        self.matcher
+            .find_iter(mat.bytes(), |_| {
+                match_count += 1;
+                true
+            })
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.results.record_match(&self.path, match_count.max(1));
+
+        if self.collect_content {
+            let text = String::from_utf8_lossy(mat.bytes());
+            extend_rendered_lines(
+                &mut self.results.content_lines,
+                &self.path,
+                &text,
+                to_usize_line_number(mat.line_number()),
+                self.include_line_numbers,
+            );
+        }
+        Ok(true)
+    }
+
+    fn context(
+        &mut self,
+        _searcher: &Searcher,
+        context: &SinkContext<'_>,
+    ) -> std::result::Result<bool, Self::Error> {
+        if self.collect_content {
+            let text = String::from_utf8_lossy(context.bytes());
+            extend_rendered_lines(
+                &mut self.results.content_lines,
+                &self.path,
+                &text,
+                to_usize_line_number(context.line_number()),
+                self.include_line_numbers,
+            );
+        }
+        Ok(true)
     }
 }
 
@@ -1159,16 +1256,16 @@ fn collect_lines(content: &str) -> Vec<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RipgrepRenderedLine {
+struct GrepRenderedLine {
     path: String,
     text: String,
 }
 
 #[derive(Debug, Default)]
-struct RipgrepSearchResult {
+struct GrepSearchResult {
     matched_files: Vec<String>,
     match_counts: HashMap<String, usize>,
-    content_lines: Vec<RipgrepRenderedLine>,
+    content_lines: Vec<GrepRenderedLine>,
     total_matches: usize,
 }
 
@@ -1441,6 +1538,45 @@ mod tests {
 
         assert_eq!(output.num_files, 1);
         assert_eq!(output.filenames, vec![file.display().to_string()]);
+    }
+
+    #[tokio::test]
+    async fn grep_filters_matches_with_glob_patterns() {
+        let dir = tempdir().unwrap();
+        let rust_file = dir.path().join("main.rs");
+        let text_file = dir.path().join("notes.txt");
+        tokio::fs::write(&rust_file, "needle in rust\n")
+            .await
+            .unwrap();
+        tokio::fs::write(&text_file, "needle in text\n")
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(PathBuf::from(
+            dir.path(),
+        ))));
+        let output = service
+            .grep_files(GrepInput {
+                pattern: "needle".to_string(),
+                path: None,
+                glob: Some("*.txt".to_string()),
+                output_mode: GrepOutputMode::FilesWithMatches,
+                before: None,
+                after: None,
+                context_alias: None,
+                context: None,
+                line_numbers: None,
+                case_insensitive: None,
+                file_type: None,
+                head_limit: None,
+                offset: None,
+                multiline: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.num_files, 1);
+        assert_eq!(output.filenames, vec!["notes.txt".to_string()]);
     }
 
     #[tokio::test]
