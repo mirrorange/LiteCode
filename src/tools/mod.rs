@@ -20,7 +20,7 @@ pub fn build_router() -> ToolRouter<LiteCodeServer> {
         .with_async_tool::<edit::EditTool>()
         .with_async_tool::<glob::GlobTool>()
         .with_async_tool::<grep::GrepTool>()
-        .with_async_tool::<notebook::NotebookEditTool>()
+        .with_route(notebook::route())
         .with_async_tool::<task_output::TaskOutputTool>()
         .with_async_tool::<task_stop::TaskStopTool>()
 }
