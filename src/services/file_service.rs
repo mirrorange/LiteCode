@@ -7,6 +7,7 @@ use std::{
 };
 
 use globwalk::GlobWalkerBuilder;
+use lopdf::Document;
 use regex::{Regex, RegexBuilder};
 
 use crate::{
@@ -69,12 +70,13 @@ impl FileService {
         }
 
         if path.extension().and_then(|value| value.to_str()) == Some("pdf") {
-            return Err(LiteCodeError::invalid_input(format!(
-                "PDF reading is not implemented yet for {}{}",
-                path.display(),
-                pages
-                    .map(|range| format!(" (requested pages {range})"))
-                    .unwrap_or_default()
+            let text = read_pdf_text(&path, pages).await?;
+            self.mark_read(&path);
+
+            return Ok(ReadFileOutput::Text(numbered_lines(
+                &text,
+                offset.unwrap_or(0),
+                limit.unwrap_or(2_000),
             )));
         }
 
@@ -610,6 +612,127 @@ fn render_notebook(content: &str) -> Result<String> {
     Ok(rendered.join("\n\n"))
 }
 
+async fn read_pdf_text(path: &Path, pages: Option<&str>) -> Result<String> {
+    let path = path.to_path_buf();
+    let requested_pages = pages.map(ToOwned::to_owned);
+
+    tokio::task::spawn_blocking(move || read_pdf_text_blocking(&path, requested_pages.as_deref()))
+        .await?
+}
+
+fn read_pdf_text_blocking(path: &Path, pages: Option<&str>) -> Result<String> {
+    let document = Document::load(path).map_err(|error| {
+        LiteCodeError::invalid_input(format!("Failed to read PDF {}: {error}", path.display()))
+    })?;
+    let total_pages = document.get_pages().len();
+    if total_pages == 0 {
+        return Err(LiteCodeError::invalid_input(format!(
+            "PDF {} does not contain any pages.",
+            path.display()
+        )));
+    }
+
+    let selected_pages = select_pdf_pages(total_pages, pages)?;
+    let mut rendered_pages = Vec::new();
+    for page_number in selected_pages {
+        let text = document.extract_text(&[page_number]).map_err(|error| {
+            LiteCodeError::invalid_input(format!(
+                "Failed to extract page {page_number} from PDF {}: {error}",
+                path.display()
+            ))
+        })?;
+        let body = text.trim_end();
+        rendered_pages.push(if body.is_empty() {
+            format!("Page {page_number}\n[no extractable text]")
+        } else {
+            format!("Page {page_number}\n{body}")
+        });
+    }
+
+    Ok(rendered_pages.join("\n\n"))
+}
+
+fn select_pdf_pages(total_pages: usize, pages: Option<&str>) -> Result<Vec<u32>> {
+    if total_pages > 10 && pages.is_none() {
+        return Err(LiteCodeError::invalid_input(format!(
+            "PDF has {total_pages} pages. You must provide the pages parameter when reading PDFs with more than 10 pages."
+        )));
+    }
+
+    let selected = match pages {
+        Some(spec) => parse_pdf_page_ranges(spec, total_pages)?,
+        None => (1..=u32::try_from(total_pages).expect("page count exceeds u32")).collect(),
+    };
+
+    if selected.len() > 20 {
+        return Err(LiteCodeError::invalid_input(format!(
+            "PDF page selection contains {} pages, exceeding the 20-page maximum.",
+            selected.len()
+        )));
+    }
+
+    Ok(selected)
+}
+
+fn parse_pdf_page_ranges(spec: &str, total_pages: usize) -> Result<Vec<u32>> {
+    let total_pages = u32::try_from(total_pages).expect("page count exceeds u32");
+    let mut pages = BTreeSet::new();
+
+    for part in spec.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return Err(LiteCodeError::invalid_input(format!(
+                "Invalid PDF page range {spec:?}."
+            )));
+        }
+
+        let (start, end) = match trimmed.split_once('-') {
+            Some((start, end)) => (
+                parse_pdf_page_number(start, spec)?,
+                parse_pdf_page_number(end, spec)?,
+            ),
+            None => {
+                let page = parse_pdf_page_number(trimmed, spec)?;
+                (page, page)
+            }
+        };
+
+        if start > end {
+            return Err(LiteCodeError::invalid_input(format!(
+                "Invalid PDF page range {trimmed:?}: start must be less than or equal to end."
+            )));
+        }
+        if end > total_pages {
+            return Err(LiteCodeError::invalid_input(format!(
+                "PDF page range {trimmed:?} exceeds the document page count of {total_pages}."
+            )));
+        }
+
+        pages.extend(start..=end);
+    }
+
+    if pages.is_empty() {
+        return Err(LiteCodeError::invalid_input(format!(
+            "Invalid PDF page range {spec:?}."
+        )));
+    }
+
+    Ok(pages.into_iter().collect())
+}
+
+fn parse_pdf_page_number(value: &str, spec: &str) -> Result<u32> {
+    let page = value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| LiteCodeError::invalid_input(format!("Invalid PDF page range {spec:?}.")))?;
+    if page == 0 {
+        return Err(LiteCodeError::invalid_input(format!(
+            "Invalid PDF page range {spec:?}: page numbers start at 1."
+        )));
+    }
+    Ok(page)
+}
+
 fn detect_image_mime_type(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?;
     if extension.eq_ignore_ascii_case("png") {
@@ -867,8 +990,16 @@ fn collect_lines(content: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        convert::TryFrom,
+        path::{Path, PathBuf},
+    };
 
+    use lopdf::{
+        Document, Object, Stream,
+        content::{Content, Operation},
+        dictionary,
+    };
     use tempfile::tempdir;
 
     use crate::schema::{EditInput, GlobInput, GrepInput, GrepOutputMode, WriteInput};
@@ -914,6 +1045,76 @@ mod tests {
                 mime_type: "image/png".to_string(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn read_extracts_text_from_selected_pdf_pages() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.pdf");
+        write_test_pdf(&file, &["alpha page", "beta page", "gamma page"]);
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let content = service
+            .read_file(&file, None, None, Some("2-3"))
+            .await
+            .unwrap();
+
+        let ReadFileOutput::Text(text) = content else {
+            panic!("expected text output");
+        };
+        assert!(text.contains("Page 2"));
+        assert!(text.contains("beta page"));
+        assert!(text.contains("Page 3"));
+        assert!(text.contains("gamma page"));
+        assert!(!text.contains("Page 1"));
+    }
+
+    #[tokio::test]
+    async fn read_requires_pages_for_large_pdfs() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("large.pdf");
+        let pages = (1..=11)
+            .map(|index| format!("page {index}"))
+            .collect::<Vec<_>>();
+        let page_refs = pages.iter().map(String::as_str).collect::<Vec<_>>();
+        write_test_pdf(&file, &page_refs);
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let error = service
+            .read_file(&file, None, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("must provide the pages parameter")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_rejects_pdf_requests_larger_than_twenty_pages() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("too-many-pages.pdf");
+        let pages = (1..=21)
+            .map(|index| format!("page {index}"))
+            .collect::<Vec<_>>();
+        let page_refs = pages.iter().map(String::as_str).collect::<Vec<_>>();
+        write_test_pdf(&file, &page_refs);
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let error = service
+            .read_file(&file, None, None, Some("1-21"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("20-page maximum"));
     }
 
     #[tokio::test]
@@ -1106,5 +1307,60 @@ mod tests {
                 .unwrap(),
             "print('bye')\n"
         );
+    }
+
+    fn write_test_pdf(path: &Path, page_texts: &[&str]) {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Courier",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => font_id,
+            },
+        });
+
+        let mut page_ids = Vec::new();
+        for text in page_texts {
+            let content = Content {
+                operations: vec![
+                    Operation::new("BT", vec![]),
+                    Operation::new("Tf", vec!["F1".into(), 18.into()]),
+                    Operation::new("Td", vec![72.into(), 720.into()]),
+                    Operation::new("Tj", vec![Object::string_literal(*text)]),
+                    Operation::new("ET", vec![]),
+                ],
+            };
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+            });
+            page_ids.push(page_id);
+        }
+
+        let kids = page_ids.iter().copied().map(Into::into).collect::<Vec<_>>();
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => i64::try_from(page_ids.len()).unwrap(),
+                "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            }),
+        );
+
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc.compress();
+        doc.save(path).unwrap();
     }
 }

@@ -8,13 +8,13 @@
 **Goal**: Implement PDF reading with page-range validation and extracted page content.
 **Success Criteria**: `Read` accepts valid PDF page selections, rejects invalid or oversized requests, and returns extracted text for requested pages.
 **Tests**: Unit tests cover page-range parsing, page-limit enforcement, and PDF text extraction for selected pages.
-**Status**: In Progress
+**Status**: Complete
 
 ## Stage 3: Ripgrep-backed Grep
 **Goal**: Align `Grep` behavior with the documented ripgrep contract, including file-path searches.
 **Success Criteria**: `Grep` shells out to `rg`, supports both directory and single-file `path` values, and preserves documented flags.
 **Tests**: Unit tests cover file-path search, multiline search, output modes, and ripgrep-backed counts.
-**Status**: Not Started
+**Status**: In Progress
 
 ## Stage 4: Notebook Cell Number Alignment
 **Goal**: Support notebook editing by 0-indexed `cell_number` as described in the tool contract.
