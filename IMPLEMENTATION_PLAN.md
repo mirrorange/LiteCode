@@ -14,10 +14,10 @@
 **Goal**: Align `Grep` behavior with the documented ripgrep contract, including file-path searches.
 **Success Criteria**: `Grep` shells out to `rg`, supports both directory and single-file `path` values, and preserves documented flags.
 **Tests**: Unit tests cover file-path search, multiline search, output modes, and ripgrep-backed counts.
-**Status**: In Progress
+**Status**: Complete
 
 ## Stage 4: Notebook Cell Number Alignment
 **Goal**: Support notebook editing by 0-indexed `cell_number` as described in the tool contract.
 **Success Criteria**: Replace, insert, and delete operations accept `cell_number`; existing `cell_id` behavior remains compatible where practical.
 **Tests**: Unit tests cover replace/insert/delete by `cell_number` and compatibility with current ID-based flows.
-**Status**: Not Started
+**Status**: In Progress

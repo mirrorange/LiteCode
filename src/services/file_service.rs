@@ -1,14 +1,14 @@
 use std::{
-    collections::{BTreeSet, HashSet},
-    ops::RangeInclusive,
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Instant,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use globwalk::GlobWalkerBuilder;
 use lopdf::Document;
-use regex::{Regex, RegexBuilder};
+use tokio::process::Command;
 
 use crate::{
     error::{LiteCodeError, Result},
@@ -248,10 +248,7 @@ impl FileService {
 
     pub async fn grep_files(&self, input: GrepInput) -> Result<GrepOutput> {
         let mode = input.output_mode;
-        let root = self.resolve_search_root(input.path.as_deref())?;
-        let files =
-            self.collect_candidate_files(&root, input.glob.as_deref(), input.file_type.as_deref())?;
-        let matcher = build_regex(&input)?;
+        let target = self.resolve_grep_target(input.path.as_deref())?;
         let limit = input.head_limit.unwrap_or(0);
         let offset = input.offset.unwrap_or(0);
 
@@ -274,65 +271,12 @@ impl FileService {
             0
         };
 
-        let mut matched_files = Vec::new();
-        let mut content_entries = Vec::new();
-        let mut count_entries = Vec::new();
-        let mut total_matches = 0usize;
-
-        for path in files {
-            let file_text = match tokio::fs::read_to_string(&path).await {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-
-            let file_matches = if input.multiline {
-                matcher.find_iter(&file_text).count()
-            } else {
-                line_matches(&matcher, &file_text).len()
-            };
-
-            if file_matches == 0 {
-                continue;
-            }
-
-            total_matches += file_matches;
-            matched_files.push(path.display().to_string());
-
-            match mode {
-                GrepOutputMode::FilesWithMatches => {}
-                GrepOutputMode::Count => {
-                    count_entries.push(format!("{}:{file_matches}", path.display()));
-                }
-                GrepOutputMode::Content => {
-                    if input.multiline {
-                        for matched in matcher.find_iter(&file_text) {
-                            let start_line = file_text[..matched.start()]
-                                .bytes()
-                                .filter(|byte| *byte == b'\n')
-                                .count()
-                                + 1;
-                            let snippet = matched.as_str().replace('\n', "\\n");
-                            content_entries
-                                .push(format!("{}:{start_line}:{snippet}", path.display()));
-                        }
-                    } else {
-                        let lines = collect_content_lines(
-                            &path,
-                            &file_text,
-                            &matcher,
-                            before,
-                            after,
-                            input.line_numbers.unwrap_or(true),
-                        );
-                        content_entries.extend(lines);
-                    }
-                }
-            }
-        }
+        let results = self.run_ripgrep(&target, &input, before, after).await?;
+        let total_matches = results.total_matches;
 
         Ok(match mode {
             GrepOutputMode::FilesWithMatches => {
-                let filenames = apply_window(&matched_files, offset, limit);
+                let filenames = apply_window(&results.matched_files, offset, limit);
                 GrepOutput {
                     mode: Some(mode),
                     num_files: filenames.len(),
@@ -345,6 +289,11 @@ impl FileService {
                 }
             }
             GrepOutputMode::Count => {
+                let count_entries = results
+                    .matched_files
+                    .iter()
+                    .map(|path| format!("{path}:{}", results.match_counts[path]))
+                    .collect::<Vec<_>>();
                 let windowed = apply_window(&count_entries, offset, limit);
                 let filenames = windowed
                     .iter()
@@ -362,10 +311,10 @@ impl FileService {
                 }
             }
             GrepOutputMode::Content => {
-                let windowed = apply_window(&content_entries, offset, limit);
+                let windowed = apply_window(&results.content_lines, offset, limit);
                 let filenames = windowed
                     .iter()
-                    .filter_map(|entry| entry.split_once(':').map(|(path, _)| path.to_string()))
+                    .map(|entry| entry.path.clone())
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>();
@@ -373,7 +322,13 @@ impl FileService {
                     mode: Some(mode),
                     num_files: filenames.len(),
                     filenames,
-                    content: Some(windowed.join("\n")),
+                    content: Some(
+                        windowed
+                            .iter()
+                            .map(|entry| entry.text.clone())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                     num_lines: Some(windowed.len()),
                     num_matches: Some(total_matches),
                     applied_limit: Some(limit),
@@ -520,27 +475,85 @@ impl FileService {
         Ok(root)
     }
 
-    fn collect_candidate_files(
+    fn resolve_grep_target(&self, path: Option<&str>) -> Result<PathBuf> {
+        let target = match path {
+            Some(value) => {
+                let candidate = PathBuf::from(value);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    self.working_dir().join(candidate)
+                }
+            }
+            None => self.working_dir(),
+        };
+
+        if !target.exists() {
+            return Err(LiteCodeError::invalid_input(format!(
+                "Search path {} does not exist.",
+                target.display()
+            )));
+        }
+
+        Ok(target)
+    }
+
+    async fn run_ripgrep(
         &self,
-        root: &Path,
-        glob_pattern: Option<&str>,
-        file_type: Option<&str>,
-    ) -> Result<Vec<PathBuf>> {
-        let pattern = glob_pattern.unwrap_or("**/*");
-        let walker = GlobWalkerBuilder::from_patterns(root, &[pattern])
-            .build()
-            .map_err(|error| LiteCodeError::internal(error.to_string()))?;
+        target: &Path,
+        input: &GrepInput,
+        before: usize,
+        after: usize,
+    ) -> Result<RipgrepSearchResult> {
+        let mut command = Command::new("rg");
+        command.arg("--json");
+        command.args(["--color", "never"]);
 
-        let mut files = walker
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| entry.path().to_path_buf())
-            .filter(|path| matches_file_type(path, file_type))
-            .collect::<Vec<_>>();
+        if input.output_mode == GrepOutputMode::Content {
+            command.arg("-n");
+            if before > 0 {
+                command.arg("-B").arg(before.to_string());
+            }
+            if after > 0 {
+                command.arg("-A").arg(after.to_string());
+            }
+        }
 
-        files.sort();
-        Ok(files)
+        if input.case_insensitive.unwrap_or(false) {
+            command.arg("-i");
+        }
+        if let Some(glob_pattern) = input.glob.as_deref() {
+            command.arg("--glob").arg(glob_pattern);
+        }
+        if let Some(file_type) = input.file_type.as_deref() {
+            command.arg("--type").arg(file_type);
+        }
+        if input.multiline {
+            command.args(["-U", "--multiline", "--multiline-dotall"]);
+        }
+
+        command.arg(&input.pattern);
+        command.arg(target);
+
+        let output = command.output().await.map_err(|error| {
+            LiteCodeError::internal(format!("Failed to execute ripgrep: {error}"))
+        })?;
+        let status = output.status.code().unwrap_or_default();
+        if status != 0 && status != 1 {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let message = if stderr.is_empty() {
+                "ripgrep search failed.".to_string()
+            } else {
+                format!("ripgrep search failed: {stderr}")
+            };
+            return Err(LiteCodeError::invalid_input(message));
+        }
+
+        parse_ripgrep_output(
+            &String::from_utf8_lossy(&output.stdout),
+            input.output_mode,
+            input.line_numbers.unwrap_or(true),
+        )
     }
 
     fn mark_read(&self, path: &Path) {
@@ -781,94 +794,170 @@ fn build_structured_patch(original: &str, updated: &str) -> Vec<StructuredPatchH
     }]
 }
 
-fn build_regex(input: &GrepInput) -> Result<Regex> {
-    RegexBuilder::new(&input.pattern)
-        .case_insensitive(input.case_insensitive.unwrap_or(false))
-        .dot_matches_new_line(input.multiline)
-        .build()
-        .map_err(|error| LiteCodeError::invalid_input(format!("Invalid grep pattern: {error}")))
-}
-
-fn line_matches(regex: &Regex, content: &str) -> Vec<usize> {
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| regex.is_match(line).then_some(index))
-        .collect()
-}
-
-fn collect_content_lines(
-    path: &Path,
-    content: &str,
-    regex: &Regex,
-    before: usize,
-    after: usize,
+fn parse_ripgrep_output(
+    stdout: &str,
+    mode: GrepOutputMode,
     line_numbers: bool,
-) -> Vec<String> {
-    let lines = content.lines().collect::<Vec<_>>();
-    let matches = line_matches(regex, content);
-    let mut ranges = Vec::<RangeInclusive<usize>>::new();
+) -> Result<RipgrepSearchResult> {
+    let mut matched_files = Vec::new();
+    let mut file_indexes = HashMap::new();
+    let mut match_counts = Vec::<usize>::new();
+    let mut content_lines = Vec::new();
+    let mut total_matches = 0usize;
 
-    for matched_line in matches {
-        let start = matched_line.saturating_sub(before);
-        let end = (matched_line + after).min(lines.len().saturating_sub(1));
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let value = serde_json::from_str::<serde_json::Value>(line).map_err(|error| {
+            LiteCodeError::internal(format!("Failed to parse ripgrep JSON output: {error}"))
+        })?;
 
-        match ranges.last_mut() {
-            Some(last) if start <= *last.end() + 1 => {
-                let merged_start = *last.start();
-                *last = merged_start..=end.max(*last.end());
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("match") => {
+                let Some(path) = ripgrep_path(&value) else {
+                    continue;
+                };
+                let file_index = match file_indexes.get(&path) {
+                    Some(index) => *index,
+                    None => {
+                        let index = matched_files.len();
+                        file_indexes.insert(path.clone(), index);
+                        matched_files.push(path.clone());
+                        match_counts.push(0);
+                        index
+                    }
+                };
+
+                let submatch_count = value
+                    .get("data")
+                    .and_then(|data| data.get("submatches"))
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| items.len().max(1))
+                    .unwrap_or(1);
+                match_counts[file_index] += submatch_count;
+
+                if mode == GrepOutputMode::Content {
+                    let line_text = ripgrep_lines_text(&value).unwrap_or_default();
+                    let line_number = value
+                        .get("data")
+                        .and_then(|data| data.get("line_number"))
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok());
+                    extend_rendered_lines(
+                        &mut content_lines,
+                        &path,
+                        &line_text,
+                        line_number,
+                        line_numbers,
+                    );
+                }
             }
-            _ => ranges.push(start..=end),
+            Some("context") if mode == GrepOutputMode::Content => {
+                let Some(path) = ripgrep_path(&value) else {
+                    continue;
+                };
+                let line_text = ripgrep_lines_text(&value).unwrap_or_default();
+                let line_number = value
+                    .get("data")
+                    .and_then(|data| data.get("line_number"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok());
+                extend_rendered_lines(
+                    &mut content_lines,
+                    &path,
+                    &line_text,
+                    line_number,
+                    line_numbers,
+                );
+            }
+            Some("summary") => {
+                total_matches = value
+                    .get("data")
+                    .and_then(|data| data.get("stats"))
+                    .and_then(|stats| stats.get("matches"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(total_matches);
+            }
+            _ => {}
         }
     }
 
-    let mut rendered = Vec::new();
-    for range in ranges {
-        for index in range {
-            let line = lines.get(index).copied().unwrap_or_default();
-            if line_numbers {
-                rendered.push(format!("{}:{}:{line}", path.display(), index + 1));
-            } else {
-                rendered.push(format!("{}:{line}", path.display()));
-            }
-        }
+    if total_matches == 0 {
+        total_matches = match_counts.iter().sum();
     }
 
-    rendered
+    let match_counts = matched_files
+        .iter()
+        .cloned()
+        .zip(match_counts)
+        .collect::<HashMap<_, _>>();
+
+    Ok(RipgrepSearchResult {
+        matched_files,
+        match_counts,
+        content_lines,
+        total_matches,
+    })
 }
 
-fn apply_window(entries: &[String], offset: usize, limit: usize) -> Vec<String> {
+fn ripgrep_path(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("data")
+        .and_then(|data| data.get("path"))
+        .and_then(|path| path.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn ripgrep_lines_text(value: &serde_json::Value) -> Option<String> {
+    let lines = value.get("data")?.get("lines")?;
+    if let Some(text) = lines.get("text").and_then(serde_json::Value::as_str) {
+        return Some(text.to_string());
+    }
+
+    lines
+        .get("bytes")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|encoded| {
+            STANDARD
+                .decode(encoded)
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        })
+}
+
+fn extend_rendered_lines(
+    rendered: &mut Vec<RipgrepRenderedLine>,
+    path: &str,
+    text: &str,
+    line_number: Option<usize>,
+    include_line_numbers: bool,
+) {
+    let base_line_number = line_number.unwrap_or(1);
+    let segments = text
+        .split('\n')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    for (index, segment) in segments.into_iter().enumerate() {
+        let text = if include_line_numbers {
+            format!("{path}:{}:{segment}", base_line_number + index)
+        } else {
+            format!("{path}:{segment}")
+        };
+        rendered.push(RipgrepRenderedLine {
+            path: path.to_string(),
+            text,
+        });
+    }
+}
+
+fn apply_window<T: Clone>(entries: &[T], offset: usize, limit: usize) -> Vec<T> {
     let iter = entries.iter().skip(offset);
     if limit == 0 {
         iter.cloned().collect()
     } else {
         iter.take(limit).cloned().collect()
     }
-}
-
-fn matches_file_type(path: &Path, file_type: Option<&str>) -> bool {
-    let Some(file_type) = file_type else {
-        return true;
-    };
-    let ext = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    let matches = match file_type {
-        "rust" => &["rs"][..],
-        "js" => &["js", "cjs", "mjs"][..],
-        "ts" => &["ts"][..],
-        "tsx" => &["tsx"][..],
-        "py" => &["py"][..],
-        "go" => &["go"][..],
-        "java" => &["java"][..],
-        "json" => &["json"][..],
-        "md" => &["md"][..],
-        "toml" => &["toml"][..],
-        other => &[other],
-    };
-
-    matches.contains(&ext)
 }
 
 fn value_as_lines(value: Option<&serde_json::Value>) -> Vec<String> {
@@ -986,6 +1075,20 @@ fn collect_lines(content: &str) -> Vec<String> {
     } else {
         content.lines().map(ToString::to_string).collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RipgrepRenderedLine {
+    path: String,
+    text: String,
+}
+
+#[derive(Debug, Default)]
+struct RipgrepSearchResult {
+    matched_files: Vec<String>,
+    match_counts: HashMap<String, usize>,
+    content_lines: Vec<RipgrepRenderedLine>,
+    total_matches: usize,
 }
 
 #[cfg(test)]
@@ -1222,6 +1325,113 @@ mod tests {
                 .unwrap()
                 .contains("main.rs:2:let needle = 1;")
         );
+    }
+
+    #[tokio::test]
+    async fn grep_supports_single_file_paths() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        let other = dir.path().join("other.rs");
+        tokio::fs::write(&file, "let needle = 1;\n").await.unwrap();
+        tokio::fs::write(&other, "let needle = 2;\n").await.unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(PathBuf::from(
+            dir.path(),
+        ))));
+        let output = service
+            .grep_files(GrepInput {
+                pattern: "needle".to_string(),
+                path: Some(file.display().to_string()),
+                glob: None,
+                output_mode: GrepOutputMode::FilesWithMatches,
+                before: None,
+                after: None,
+                context_alias: None,
+                context: None,
+                line_numbers: None,
+                case_insensitive: None,
+                file_type: None,
+                head_limit: None,
+                offset: None,
+                multiline: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.num_files, 1);
+        assert_eq!(output.filenames, vec![file.display().to_string()]);
+    }
+
+    #[tokio::test]
+    async fn grep_counts_individual_matches_with_ripgrep() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        tokio::fs::write(&file, "needle needle\nneedle\n")
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(PathBuf::from(
+            dir.path(),
+        ))));
+        let output = service
+            .grep_files(GrepInput {
+                pattern: "needle".to_string(),
+                path: None,
+                glob: None,
+                output_mode: GrepOutputMode::Count,
+                before: None,
+                after: None,
+                context_alias: None,
+                context: None,
+                line_numbers: None,
+                case_insensitive: None,
+                file_type: Some("rust".to_string()),
+                head_limit: None,
+                offset: None,
+                multiline: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.num_matches, Some(3));
+        assert!(output.content.unwrap().contains("main.rs:3"));
+    }
+
+    #[tokio::test]
+    async fn grep_supports_ripgrep_multiline_searches() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        tokio::fs::write(&file, "fn start() {\nfoo\nbar\n}\n")
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(PathBuf::from(
+            dir.path(),
+        ))));
+        let output = service
+            .grep_files(GrepInput {
+                pattern: "foo\\nbar".to_string(),
+                path: None,
+                glob: None,
+                output_mode: GrepOutputMode::Content,
+                before: None,
+                after: None,
+                context_alias: None,
+                context: None,
+                line_numbers: Some(true),
+                case_insensitive: None,
+                file_type: Some("rust".to_string()),
+                head_limit: None,
+                offset: None,
+                multiline: true,
+            })
+            .await
+            .unwrap();
+
+        let content = output.content.unwrap();
+        assert!(content.contains("main.rs:2:foo"));
+        assert!(content.contains("main.rs:3:bar"));
+        assert_eq!(output.num_matches, Some(1));
     }
 
     #[tokio::test]
