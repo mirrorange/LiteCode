@@ -106,4 +106,29 @@ mod tests {
         assert!(tasks.supports_cancel());
         assert!(tasks.supports_tools_call());
     }
+
+    #[test]
+    fn registers_all_required_tools() {
+        let router = crate::tools::build_router();
+        let tool_names = router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            tool_names,
+            vec![
+                "Bash",
+                "Edit",
+                "Glob",
+                "Grep",
+                "NotebookEdit",
+                "Read",
+                "TaskOutput",
+                "TaskStop",
+                "Write",
+            ]
+        );
+    }
 }
