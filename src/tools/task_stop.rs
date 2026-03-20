@@ -23,7 +23,15 @@ impl ToolBase for TaskStopTool {
     }
 
     fn description() -> Option<Cow<'static, str>> {
-        Some("Stops a running background task.".into())
+        Some(
+            r#"
+- Stops a running background shell task by its ID
+- Takes a task_id parameter identifying the task to stop
+- Returns a success or failure status
+- Use this tool when you need to terminate a long-running shell task
+"#
+            .into(),
+        )
     }
 }
 

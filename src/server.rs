@@ -86,9 +86,10 @@ impl ServerHandler for LiteCodeServer {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, path::PathBuf};
 
     use rmcp::model::ToolsCapability;
+    use serde_json::Value;
 
     use super::LiteCodeServer;
     use rmcp::ServerHandler;
@@ -130,5 +131,132 @@ mod tests {
                 "Write",
             ]
         );
+    }
+
+    #[test]
+    fn tool_metadata_stays_in_sync_with_docs() {
+        let actual_tools = crate::tools::build_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| {
+                let value = serde_json::to_value(tool).expect("serialize tool");
+                let name = value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .expect("tool name")
+                    .to_string();
+                (name, value)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let expected_tools = serde_json::from_str::<Value>(include_str!("../docs/tools.json"))
+            .expect("parse docs/tools.json")
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tools array")
+            .iter()
+            .map(|tool| {
+                let name = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .expect("documented tool name")
+                    .to_string();
+                (name, tool.clone())
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            actual_tools.keys().collect::<Vec<_>>(),
+            expected_tools.keys().collect::<Vec<_>>()
+        );
+
+        for (name, expected) in expected_tools {
+            let actual = actual_tools.get(&name).expect("actual tool entry");
+            assert_eq!(actual.get("name"), expected.get("name"), "tool name mismatch");
+            assert_eq!(
+                normalized_string(actual.get("description")),
+                normalized_string(expected.get("description")),
+                "tool description mismatch for {name}"
+            );
+
+            compare_schema(&name, "inputSchema", actual, &expected);
+            compare_schema(&name, "outputSchema", actual, &expected);
+        }
+    }
+
+    fn compare_schema(tool_name: &str, schema_key: &str, actual: &Value, expected: &Value) {
+        match (actual.get(schema_key), expected.get(schema_key)) {
+            (None, None) => {}
+            (Some(actual_schema), Some(expected_schema)) => {
+                assert_eq!(
+                    actual_schema.get("additionalProperties"),
+                    expected_schema.get("additionalProperties"),
+                    "{tool_name} {schema_key} additionalProperties mismatch"
+                );
+                assert_eq!(
+                    actual_schema.get("required"),
+                    expected_schema.get("required"),
+                    "{tool_name} {schema_key} required mismatch"
+                );
+
+                let actual_properties = actual_schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .expect("actual properties");
+                let expected_properties = expected_schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .expect("expected properties");
+
+                assert_eq!(
+                    actual_properties.keys().collect::<Vec<_>>(),
+                    expected_properties.keys().collect::<Vec<_>>(),
+                    "{tool_name} {schema_key} property keys mismatch"
+                );
+
+                for (property_name, expected_property) in expected_properties {
+                    let actual_property = actual_properties
+                        .get(property_name)
+                        .unwrap_or_else(|| panic!("missing property {property_name}"));
+                    if expected_property.get("description").is_some() {
+                        assert_eq!(
+                            normalized_string(actual_property.get("description")),
+                            normalized_string(expected_property.get("description")),
+                            "{tool_name} {schema_key}.{property_name} description mismatch"
+                        );
+                    }
+                    if expected_property.get("default").is_some() {
+                        assert_eq!(
+                            actual_property.get("default"),
+                            expected_property.get("default"),
+                            "{tool_name} {schema_key}.{property_name} default mismatch"
+                        );
+                    }
+                    if expected_property.get("minimum").is_some() {
+                        assert_eq!(
+                            actual_property.get("minimum"),
+                            expected_property.get("minimum"),
+                            "{tool_name} {schema_key}.{property_name} minimum mismatch"
+                        );
+                    }
+                    if expected_property.get("maximum").is_some() {
+                        assert_eq!(
+                            actual_property.get("maximum"),
+                            expected_property.get("maximum"),
+                            "{tool_name} {schema_key}.{property_name} maximum mismatch"
+                        );
+                    }
+                }
+            }
+            (actual_schema, expected_schema) => panic!(
+                "{tool_name} {schema_key} presence mismatch: actual={actual_schema:?} expected={expected_schema:?}"
+            ),
+        }
+    }
+
+    fn normalized_string(value: Option<&Value>) -> Option<String> {
+        value
+            .and_then(Value::as_str)
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 }
