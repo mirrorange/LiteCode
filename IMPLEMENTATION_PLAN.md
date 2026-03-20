@@ -14,13 +14,13 @@
 **Goal**: 实现命令执行与后台任务管理，交付 `Bash`、`TaskOutput`、`TaskStop` 工具。
 **Success Criteria**: 前台/后台命令执行可用；任务状态可查询和停止；工作目录可跨命令持久化。
 **Tests**: Bash 前台执行测试；后台任务查询与停止测试；工作目录持久化测试。
-**Status**: In Progress
+**Status**: Complete
 
 ## Stage 4: Notebook And Policy
 **Goal**: 实现 `NotebookEdit`，并补齐跨工具状态跟踪与约束校验。
 **Success Criteria**: 支持 notebook cell replace/insert/delete；跨工具读写策略一致；错误信息清晰。
 **Tests**: notebook 编辑模式测试；未读取即写/编辑失败测试；边界输入测试。
-**Status**: Not Started
+**Status**: In Progress
 
 ## Stage 5: Integration And Polish
 **Goal**: 完成端到端验证、整理文档与代码，移除计划文件。
