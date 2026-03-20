@@ -172,7 +172,11 @@ mod tests {
 
         for (name, expected) in expected_tools {
             let actual = actual_tools.get(&name).expect("actual tool entry");
-            assert_eq!(actual.get("name"), expected.get("name"), "tool name mismatch");
+            assert_eq!(
+                actual.get("name"),
+                expected.get("name"),
+                "tool name mismatch"
+            );
             assert_eq!(
                 normalized_string(actual.get("description")),
                 normalized_string(expected.get("description")),

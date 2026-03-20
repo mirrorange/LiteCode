@@ -18,6 +18,12 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadFileOutput {
+    Text(String),
+    Image { data: Vec<u8>, mime_type: String },
+}
+
 #[derive(Debug)]
 struct FileServiceState {
     working_dir: Arc<Mutex<PathBuf>>,
@@ -53,7 +59,7 @@ impl FileService {
         offset: Option<usize>,
         limit: Option<usize>,
         pages: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<ReadFileOutput> {
         let path = self.require_absolute_file(file_path.as_ref())?;
         let metadata = tokio::fs::metadata(&path).await?;
         if metadata.is_dir() {
@@ -73,6 +79,14 @@ impl FileService {
         }
 
         let raw = tokio::fs::read(&path).await?;
+        if let Some(mime_type) = detect_image_mime_type(&path) {
+            self.mark_read(&path);
+            return Ok(ReadFileOutput::Image {
+                data: raw,
+                mime_type: mime_type.to_string(),
+            });
+        }
+
         let text = if path.extension().and_then(|value| value.to_str()) == Some("ipynb") {
             render_notebook(&String::from_utf8_lossy(&raw))?
         } else {
@@ -82,14 +96,16 @@ impl FileService {
         self.mark_read(&path);
 
         if text.is_empty() {
-            return Ok("Warning: file exists but is empty.".to_string());
+            return Ok(ReadFileOutput::Text(
+                "Warning: file exists but is empty.".to_string(),
+            ));
         }
 
-        Ok(numbered_lines(
+        Ok(ReadFileOutput::Text(numbered_lines(
             &text,
             offset.unwrap_or(0),
             limit.unwrap_or(2_000),
-        ))
+        )))
     }
 
     pub async fn write_file(&self, input: WriteInput) -> Result<WriteOutput> {
@@ -594,6 +610,23 @@ fn render_notebook(content: &str) -> Result<String> {
     Ok(rendered.join("\n\n"))
 }
 
+fn detect_image_mime_type(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("png") {
+        Some("image/png")
+    } else if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
+        Some("image/jpeg")
+    } else if extension.eq_ignore_ascii_case("gif") {
+        Some("image/gif")
+    } else if extension.eq_ignore_ascii_case("webp") {
+        Some("image/webp")
+    } else if extension.eq_ignore_ascii_case("bmp") {
+        Some("image/bmp")
+    } else {
+        None
+    }
+}
+
 fn numbered_lines(content: &str, offset: usize, limit: usize) -> String {
     let lines = content.lines().collect::<Vec<_>>();
     let start = offset.min(lines.len());
@@ -841,7 +874,7 @@ mod tests {
     use crate::schema::{EditInput, GlobInput, GrepInput, GrepOutputMode, WriteInput};
     use crate::schema::{NotebookCellType, NotebookEditInput, NotebookEditMode};
 
-    use super::FileService;
+    use super::{FileService, ReadFileOutput};
 
     #[tokio::test]
     async fn read_numbers_lines() {
@@ -859,7 +892,28 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(content, "     2\tbeta");
+        assert_eq!(content, ReadFileOutput::Text("     2\tbeta".to_string()));
+    }
+
+    #[tokio::test]
+    async fn read_returns_image_output_for_supported_extensions() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.png");
+        let png_bytes = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        tokio::fs::write(&file, &png_bytes).await.unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let content = service.read_file(&file, None, None, None).await.unwrap();
+
+        assert_eq!(
+            content,
+            ReadFileOutput::Image {
+                data: png_bytes,
+                mime_type: "image/png".to_string(),
+            }
+        );
     }
 
     #[tokio::test]

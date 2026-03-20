@@ -15,7 +15,7 @@ pub mod write;
 pub fn build_router() -> ToolRouter<LiteCodeServer> {
     ToolRouter::new()
         .with_async_tool::<bash::BashTool>()
-        .with_async_tool::<read::ReadTool>()
+        .with_route(read::route())
         .with_async_tool::<write::WriteTool>()
         .with_async_tool::<edit::EditTool>()
         .with_async_tool::<glob::GlobTool>()
