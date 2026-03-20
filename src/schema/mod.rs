@@ -277,6 +277,54 @@ pub struct TaskStopOutput {
     pub command: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotebookCellType {
+    Code,
+    Markdown,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotebookEditMode {
+    Replace,
+    Insert,
+    Delete,
+}
+
+impl Default for NotebookEditMode {
+    fn default() -> Self {
+        Self::Replace
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NotebookEditInput {
+    pub notebook_path: String,
+    pub cell_id: Option<String>,
+    pub new_source: String,
+    pub cell_type: Option<NotebookCellType>,
+    #[serde(default)]
+    pub edit_mode: NotebookEditMode,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NotebookEditOutput {
+    pub new_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_id: Option<String>,
+    pub cell_type: NotebookCellType,
+    pub language: String,
+    pub edit_mode: NotebookEditMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub notebook_path: String,
+    pub original_file: String,
+    pub updated_file: String,
+}
+
 const fn default_true() -> bool {
     true
 }

@@ -13,6 +13,7 @@ use crate::{
     error::{LiteCodeError, Result},
     schema::{
         EditInput, EditOutput, GlobInput, GlobOutput, GrepInput, GrepOutput, GrepOutputMode,
+        NotebookCellType, NotebookEditInput, NotebookEditMode, NotebookEditOutput,
         StructuredPatchHunk, WriteInput, WriteOutput, WriteResultType,
     },
 };
@@ -364,6 +365,120 @@ impl FileService {
         })
     }
 
+    pub async fn edit_notebook(&self, input: NotebookEditInput) -> Result<NotebookEditOutput> {
+        let path = self.require_absolute_file(Path::new(&input.notebook_path))?;
+        if path.extension().and_then(|value| value.to_str()) != Some("ipynb") {
+            return Err(LiteCodeError::invalid_input(format!(
+                "NotebookEdit requires an .ipynb file, got {}.",
+                path.display()
+            )));
+        }
+
+        let original_file = tokio::fs::read_to_string(&path).await?;
+        let mut notebook =
+            serde_json::from_str::<serde_json::Value>(&original_file).map_err(|error| {
+                LiteCodeError::invalid_input(format!("Invalid notebook JSON: {error}"))
+            })?;
+        let language = notebook_language(&notebook);
+        let cells = notebook
+            .get_mut("cells")
+            .and_then(|value| value.as_array_mut())
+            .ok_or_else(|| {
+                LiteCodeError::invalid_input("Notebook does not contain a cells array.")
+            })?;
+        let output = match input.edit_mode {
+            NotebookEditMode::Replace => {
+                let cell_id = input.cell_id.clone().ok_or_else(|| {
+                    LiteCodeError::invalid_input("NotebookEdit replace mode requires cell_id.")
+                })?;
+                let index = find_cell_index(cells, &cell_id)?;
+                let cell = cells
+                    .get_mut(index)
+                    .and_then(|value| value.as_object_mut())
+                    .ok_or_else(|| LiteCodeError::internal("Notebook cell was not an object."))?;
+                let cell_type = input
+                    .cell_type
+                    .unwrap_or_else(|| notebook_cell_type(cell).unwrap_or(NotebookCellType::Code));
+
+                cell.insert(
+                    "cell_type".to_string(),
+                    serde_json::Value::String(cell_type_string(cell_type)),
+                );
+                cell.insert("source".to_string(), source_value(&input.new_source));
+                normalize_cell_shape(cell, cell_type);
+
+                NotebookEditOutput {
+                    new_source: input.new_source.clone(),
+                    cell_id: Some(cell_id),
+                    cell_type,
+                    language,
+                    edit_mode: NotebookEditMode::Replace,
+                    error: None,
+                    notebook_path: path.display().to_string(),
+                    original_file: original_file.clone(),
+                    updated_file: String::new(),
+                }
+            }
+            NotebookEditMode::Insert => {
+                let cell_type = input.cell_type.ok_or_else(|| {
+                    LiteCodeError::invalid_input("NotebookEdit insert mode requires cell_type.")
+                })?;
+                let cell_id = generated_cell_id();
+                let new_cell = new_notebook_cell(&cell_id, cell_type, &input.new_source);
+                let index = match input.cell_id.as_deref() {
+                    Some(existing_id) => find_cell_index(cells, existing_id)? + 1,
+                    None => 0,
+                };
+                cells.insert(index, new_cell);
+
+                NotebookEditOutput {
+                    new_source: input.new_source.clone(),
+                    cell_id: Some(cell_id),
+                    cell_type,
+                    language,
+                    edit_mode: NotebookEditMode::Insert,
+                    error: None,
+                    notebook_path: path.display().to_string(),
+                    original_file: original_file.clone(),
+                    updated_file: String::new(),
+                }
+            }
+            NotebookEditMode::Delete => {
+                let cell_id = input.cell_id.clone().ok_or_else(|| {
+                    LiteCodeError::invalid_input("NotebookEdit delete mode requires cell_id.")
+                })?;
+                let index = find_cell_index(cells, &cell_id)?;
+                let removed = cells.remove(index);
+                let cell_type = removed
+                    .as_object()
+                    .and_then(notebook_cell_type)
+                    .unwrap_or(NotebookCellType::Code);
+
+                NotebookEditOutput {
+                    new_source: input.new_source.clone(),
+                    cell_id: Some(cell_id),
+                    cell_type,
+                    language,
+                    edit_mode: NotebookEditMode::Delete,
+                    error: None,
+                    notebook_path: path.display().to_string(),
+                    original_file: original_file.clone(),
+                    updated_file: String::new(),
+                }
+            }
+        };
+
+        let updated_file = serde_json::to_string_pretty(&notebook)
+            .map_err(|error| LiteCodeError::internal(error.to_string()))?;
+        tokio::fs::write(&path, &updated_file).await?;
+        self.mark_read(&path);
+
+        Ok(NotebookEditOutput {
+            updated_file,
+            ..output
+        })
+    }
+
     fn resolve_search_root(&self, path: Option<&str>) -> Result<PathBuf> {
         let root = match path {
             Some(value) => {
@@ -611,6 +726,104 @@ fn value_as_lines(value: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
+fn notebook_language(notebook: &serde_json::Value) -> String {
+    notebook
+        .get("metadata")
+        .and_then(|value| value.get("language_info"))
+        .and_then(|value| value.get("name"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            notebook
+                .get("metadata")
+                .and_then(|value| value.get("kernelspec"))
+                .and_then(|value| value.get("language"))
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn notebook_cell_type(
+    cell: &serde_json::Map<String, serde_json::Value>,
+) -> Option<NotebookCellType> {
+    match cell.get("cell_type").and_then(|value| value.as_str()) {
+        Some("markdown") => Some(NotebookCellType::Markdown),
+        Some("code") => Some(NotebookCellType::Code),
+        _ => None,
+    }
+}
+
+fn cell_type_string(cell_type: NotebookCellType) -> String {
+    match cell_type {
+        NotebookCellType::Code => "code".to_string(),
+        NotebookCellType::Markdown => "markdown".to_string(),
+    }
+}
+
+fn source_value(source: &str) -> serde_json::Value {
+    serde_json::Value::Array(
+        source
+            .split_inclusive('\n')
+            .map(|line| serde_json::Value::String(line.to_string()))
+            .collect(),
+    )
+}
+
+fn generated_cell_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("cell-{nanos}")
+}
+
+fn new_notebook_cell(
+    cell_id: &str,
+    cell_type: NotebookCellType,
+    source: &str,
+) -> serde_json::Value {
+    let mut cell = serde_json::Map::new();
+    cell.insert(
+        "id".to_string(),
+        serde_json::Value::String(cell_id.to_string()),
+    );
+    cell.insert(
+        "cell_type".to_string(),
+        serde_json::Value::String(cell_type_string(cell_type)),
+    );
+    cell.insert("metadata".to_string(), serde_json::json!({}));
+    cell.insert("source".to_string(), source_value(source));
+    normalize_cell_shape(&mut cell, cell_type);
+    serde_json::Value::Object(cell)
+}
+
+fn normalize_cell_shape(
+    cell: &mut serde_json::Map<String, serde_json::Value>,
+    cell_type: NotebookCellType,
+) {
+    match cell_type {
+        NotebookCellType::Code => {
+            cell.entry("execution_count".to_string())
+                .or_insert(serde_json::Value::Null);
+            cell.entry("outputs".to_string())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        }
+        NotebookCellType::Markdown => {
+            cell.remove("execution_count");
+            cell.remove("outputs");
+        }
+    }
+}
+
+fn find_cell_index(cells: &[serde_json::Value], cell_id: &str) -> Result<usize> {
+    cells
+        .iter()
+        .position(|cell| cell.get("id").and_then(|value| value.as_str()) == Some(cell_id))
+        .ok_or_else(|| {
+            LiteCodeError::invalid_input(format!("Notebook cell {cell_id} was not found."))
+        })
+}
+
 fn collect_lines(content: &str) -> Vec<String> {
     if content.is_empty() {
         Vec::new()
@@ -626,6 +839,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::schema::{EditInput, GlobInput, GrepInput, GrepOutputMode, WriteInput};
+    use crate::schema::{NotebookCellType, NotebookEditInput, NotebookEditMode};
 
     use super::FileService;
 
@@ -752,6 +966,91 @@ mod tests {
                 .content
                 .unwrap()
                 .contains("main.rs:2:let needle = 1;")
+        );
+    }
+
+    #[tokio::test]
+    async fn notebook_replace_insert_delete_work() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.ipynb");
+        let original = serde_json::json!({
+            "cells": [
+                {
+                    "id": "cell-a",
+                    "cell_type": "code",
+                    "metadata": {},
+                    "execution_count": null,
+                    "outputs": [],
+                    "source": ["print('hi')\n"]
+                }
+            ],
+            "metadata": {
+                "language_info": { "name": "python" }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        tokio::fs::write(&file, serde_json::to_string_pretty(&original).unwrap())
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+
+        let replaced = service
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: Some("cell-a".to_string()),
+                new_source: "print('bye')\n".to_string(),
+                cell_type: None,
+                edit_mode: NotebookEditMode::Replace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(replaced.language, "python");
+
+        let inserted = service
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: Some("cell-a".to_string()),
+                new_source: "# title\n".to_string(),
+                cell_type: Some(NotebookCellType::Markdown),
+                edit_mode: NotebookEditMode::Insert,
+            })
+            .await
+            .unwrap();
+        let inserted_id = inserted.cell_id.clone().unwrap();
+
+        let deleted = service
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: Some(inserted_id),
+                new_source: String::new(),
+                cell_type: None,
+                edit_mode: NotebookEditMode::Delete,
+            })
+            .await
+            .unwrap();
+        assert_eq!(deleted.edit_mode, NotebookEditMode::Delete);
+
+        let notebook = serde_json::from_str::<serde_json::Value>(
+            &tokio::fs::read_to_string(&file).await.unwrap(),
+        )
+        .unwrap();
+        let cells = notebook
+            .get("cells")
+            .and_then(|value| value.as_array())
+            .unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            cells[0]
+                .get("source")
+                .and_then(|value| value.as_array())
+                .unwrap()[0]
+                .as_str()
+                .unwrap(),
+            "print('bye')\n"
         );
     }
 }

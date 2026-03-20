@@ -20,10 +20,10 @@
 **Goal**: 实现 `NotebookEdit`，并补齐跨工具状态跟踪与约束校验。
 **Success Criteria**: 支持 notebook cell replace/insert/delete；跨工具读写策略一致；错误信息清晰。
 **Tests**: notebook 编辑模式测试；未读取即写/编辑失败测试；边界输入测试。
-**Status**: In Progress
+**Status**: Complete
 
 ## Stage 5: Integration And Polish
 **Goal**: 完成端到端验证、整理文档与代码，移除计划文件。
 **Success Criteria**: 关键集成测试通过；代码格式化完成；计划文件在全部完成后删除。
 **Tests**: STDIO/HTTP 冒烟测试；工具 schema/注册验证；完整 `cargo test`。
-**Status**: Not Started
+**Status**: In Progress
