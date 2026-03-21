@@ -169,7 +169,6 @@ pub struct WriteOutput {
     #[serde(rename = "structuredPatch")]
     pub structured_patch: Vec<StructuredPatchHunk>,
     /// The original file content before the write (null for new files)
-    #[schemars(required)]
     #[serde(rename = "originalFile")]
     pub original_file: Option<String>,
     #[serde(rename = "gitDiff", skip_serializing_if = "Option::is_none")]
