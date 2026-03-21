@@ -169,9 +169,12 @@ Edits cells in Jupyter notebooks (.ipynb).
 | --- | --- | --- | --- |
 | `notebook_path` | string | Yes | Absolute path to the `.ipynb` file |
 | `new_source` | string | Yes | New source content for the cell |
-| `cell_id` | string | No | Target cell ID |
+| `cell_id` | string | No | Target cell ID; can be used instead of `cell_number` |
+| `cell_number` | number | No | 0-indexed target cell number; can be used instead of `cell_id` |
 | `cell_type` | enum | No* | `code` | `markdown` (*required for insert mode) |
 | `edit_mode` | enum | No | `replace` (default) | `insert` | `delete` |
+
+If both `cell_id` and `cell_number` are provided, they must resolve to the same cell, or the same insertion point in `insert` mode.
 
 ---
 
