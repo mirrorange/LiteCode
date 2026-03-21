@@ -82,7 +82,7 @@ impl FileService {
             let text = read_pdf_text(&path, pages).await?;
             self.mark_read(&path);
 
-            return Ok(ReadFileOutput::Text(numbered_lines(
+            return Ok(ReadFileOutput::Text(window_file_content(
                 &text,
                 offset.unwrap_or(0),
                 limit.unwrap_or(2_000),
@@ -112,7 +112,7 @@ impl FileService {
             ));
         }
 
-        Ok(ReadFileOutput::Text(numbered_lines(
+        Ok(ReadFileOutput::Text(window_file_content(
             &text,
             offset.unwrap_or(0),
             limit.unwrap_or(2_000),
@@ -810,17 +810,12 @@ fn detect_image_mime_type(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn numbered_lines(content: &str, offset: usize, limit: usize) -> String {
+fn window_file_content(content: &str, offset: usize, limit: usize) -> String {
     let lines = content.lines().collect::<Vec<_>>();
     let start = offset.min(lines.len());
     let end = (start + limit).min(lines.len());
 
-    lines[start..end]
-        .iter()
-        .enumerate()
-        .map(|(index, line)| format!("{:>6}\t{line}", start + index + 1))
-        .collect::<Vec<_>>()
-        .join("\n")
+    lines[start..end].join("\n")
 }
 
 fn build_structured_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
@@ -1389,7 +1384,7 @@ mod tests {
     use super::{FileService, ReadFileOutput};
 
     #[tokio::test]
-    async fn read_numbers_lines() {
+    async fn read_returns_plain_content_slice() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("sample.txt");
         tokio::fs::write(&file, "alpha\nbeta\ngamma\n")
@@ -1404,7 +1399,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(content, ReadFileOutput::Text("     2\tbeta".to_string()));
+        assert_eq!(content, ReadFileOutput::Text("beta".to_string()));
     }
 
     #[tokio::test]
