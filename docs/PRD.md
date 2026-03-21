@@ -190,7 +190,6 @@ Retrieves output from a running or completed background task.
 
 **Key behaviors**:
 
-- Works with all task types: background shells, async agents, remote sessions
 - Use `block=false` for non-blocking status checks
 
 ---
