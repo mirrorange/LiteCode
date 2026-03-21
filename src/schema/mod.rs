@@ -103,103 +103,16 @@ pub struct GrepInput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct StructuredPatchHunk {
-    /// The starting line number in the original file
-    #[serde(rename = "oldStart")]
-    pub old_start: usize,
-    /// The number of lines affected in the original file
-    #[serde(rename = "oldLines")]
-    pub old_lines: usize,
-    /// The starting line number in the updated file
-    #[serde(rename = "newStart")]
-    pub new_start: usize,
-    /// The number of lines affected in the updated file
-    #[serde(rename = "newLines")]
-    pub new_lines: usize,
-    /// The patch lines for this hunk
-    pub lines: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GitDiff {
-    /// The filename relative to the repository root
-    pub filename: String,
-    /// The git status for the file
-    pub status: GitDiffStatus,
-    /// Number of added lines
-    pub additions: usize,
-    /// Number of deleted lines
-    pub deletions: usize,
-    /// Total number of changed lines
-    pub changes: usize,
-    /// Unified diff patch for the file
-    pub patch: String,
-    /// GitHub owner/repo when available
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum GitDiffStatus {
-    Modified,
-    Added,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WriteResultType {
-    Create,
-    Update,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct WriteOutput {
-    /// Whether a new file was created or an existing file was updated
-    pub r#type: WriteResultType,
-    /// The path to the file that was written
-    #[serde(rename = "filePath")]
-    pub file_path: String,
-    /// The content that was written to the file
+    /// The latest file content after the write
     pub content: String,
-    /// Diff patch showing the changes
-    #[serde(rename = "structuredPatch")]
-    pub structured_patch: Vec<StructuredPatchHunk>,
-    /// The original file content before the write (null for new files)
-    #[serde(rename = "originalFile")]
-    pub original_file: Option<String>,
-    #[serde(rename = "gitDiff", skip_serializing_if = "Option::is_none")]
-    pub git_diff: Option<GitDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditOutput {
-    /// The file path that was edited
-    #[serde(rename = "filePath")]
-    pub file_path: String,
-    /// The original string that was replaced
-    #[serde(rename = "oldString")]
-    pub old_string: String,
-    /// The new string that replaced it
-    #[serde(rename = "newString")]
-    pub new_string: String,
-    /// The original file contents before editing
-    #[serde(rename = "originalFile")]
-    pub original_file: String,
-    /// Diff patch showing the changes
-    #[serde(rename = "structuredPatch")]
-    pub structured_patch: Vec<StructuredPatchHunk>,
-    /// Whether the user modified the proposed changes
-    #[serde(rename = "userModified")]
-    pub user_modified: bool,
-    /// Whether all occurrences were replaced
-    #[serde(rename = "replaceAll")]
-    pub replace_all: bool,
-    #[serde(rename = "gitDiff", skip_serializing_if = "Option::is_none")]
-    pub git_diff: Option<GitDiff>,
+    /// The latest file content after the edit
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -361,22 +274,12 @@ pub struct NotebookEditInput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NotebookEditOutput {
-    /// The new source code that was written to the cell
-    pub new_source: String,
-    /// The ID of the cell that was edited
+    /// The latest cell content after the edit
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// The ID of a newly inserted cell when one is created
+    #[serde(rename = "cellId", skip_serializing_if = "Option::is_none")]
     pub cell_id: Option<String>,
-    /// The type of the cell
-    pub cell_type: NotebookCellType,
-    /// The programming language of the notebook
-    pub language: String,
-    /// The edit mode that was used
-    pub edit_mode: NotebookEditMode,
-    /// Error message if the operation failed
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// The path to the notebook file
-    pub notebook_path: String,
 }
 
 const fn default_true() -> bool {

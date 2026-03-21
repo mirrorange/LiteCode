@@ -23,8 +23,8 @@ use crate::{
     error::{LiteCodeError, Result},
     schema::{
         EditInput, EditOutput, GlobInput, GlobOutput, GrepInput, GrepOutput, GrepOutputMode,
-        NotebookCellType, NotebookEditInput, NotebookEditMode, NotebookEditOutput,
-        StructuredPatchHunk, WriteInput, WriteOutput, WriteResultType,
+        NotebookCellType, NotebookEditInput, NotebookEditMode, NotebookEditOutput, WriteInput,
+        WriteOutput,
     },
 };
 
@@ -165,19 +165,8 @@ impl FileService {
         tokio::fs::write(&path, &input.content).await?;
         self.mark_read(&path);
 
-        let structured_patch =
-            build_structured_patch(original.as_deref().unwrap_or(""), &input.content);
         Ok(WriteOutput {
-            r#type: if original.is_some() {
-                WriteResultType::Update
-            } else {
-                WriteResultType::Create
-            },
-            file_path: path.display().to_string(),
             content: input.content,
-            structured_patch: structured_patch,
-            original_file: original,
-            git_diff: None,
         })
     }
 
@@ -220,16 +209,7 @@ impl FileService {
         tokio::fs::write(&path, &updated).await?;
         self.mark_read(&path);
 
-        Ok(EditOutput {
-            file_path: path.display().to_string(),
-            old_string: input.old_string,
-            new_string: input.new_string,
-            original_file: original.clone(),
-            structured_patch: build_structured_patch(&original, &updated),
-            user_modified: false,
-            replace_all: input.replace_all,
-            git_diff: None,
-        })
+        Ok(EditOutput { content: updated })
     }
 
     pub fn glob_files(&self, input: GlobInput) -> Result<GlobOutput> {
@@ -376,7 +356,6 @@ impl FileService {
             serde_json::from_str::<serde_json::Value>(&original_notebook).map_err(|error| {
                 LiteCodeError::invalid_input(format!("Invalid notebook JSON: {error}"))
             })?;
-        let language = notebook_language(&notebook);
         let cells = notebook
             .get_mut("cells")
             .and_then(|value| value.as_array_mut())
@@ -385,7 +364,7 @@ impl FileService {
             })?;
         let output = match input.edit_mode {
             NotebookEditMode::Replace => {
-                let ResolvedNotebookCell { index, cell_id } = resolve_notebook_cell(
+                let ResolvedNotebookCell { index, .. } = resolve_notebook_cell(
                     cells,
                     input.cell_id.as_deref(),
                     input.cell_number,
@@ -407,13 +386,8 @@ impl FileService {
                 normalize_cell_shape(cell, cell_type);
 
                 NotebookEditOutput {
-                    new_source: input.new_source.clone(),
-                    cell_id,
-                    cell_type,
-                    language,
-                    edit_mode: NotebookEditMode::Replace,
-                    error: None,
-                    notebook_path: path.display().to_string(),
+                    content: Some(input.new_source.clone()),
+                    cell_id: None,
                 }
             }
             NotebookEditMode::Insert => {
@@ -427,36 +401,22 @@ impl FileService {
                 cells.insert(index, new_cell);
 
                 NotebookEditOutput {
-                    new_source: input.new_source.clone(),
+                    content: Some(input.new_source.clone()),
                     cell_id: Some(cell_id),
-                    cell_type,
-                    language,
-                    edit_mode: NotebookEditMode::Insert,
-                    error: None,
-                    notebook_path: path.display().to_string(),
                 }
             }
             NotebookEditMode::Delete => {
-                let ResolvedNotebookCell { index, cell_id } = resolve_notebook_cell(
+                let ResolvedNotebookCell { index, .. } = resolve_notebook_cell(
                     cells,
                     input.cell_id.as_deref(),
                     input.cell_number,
                     "delete",
                 )?;
-                let removed = cells.remove(index);
-                let cell_type = removed
-                    .as_object()
-                    .and_then(notebook_cell_type)
-                    .unwrap_or(NotebookCellType::Code);
+                cells.remove(index);
 
                 NotebookEditOutput {
-                    new_source: input.new_source.clone(),
-                    cell_id,
-                    cell_type,
-                    language,
-                    edit_mode: NotebookEditMode::Delete,
-                    error: None,
-                    notebook_path: path.display().to_string(),
+                    content: None,
+                    cell_id: None,
                 }
             }
         };
@@ -1030,24 +990,6 @@ fn window_file_content(content: &str, offset: usize, limit: usize) -> String {
     lines[start..end].join("\n")
 }
 
-fn build_structured_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
-    let old_lines = collect_lines(original);
-    let new_lines = collect_lines(updated);
-    let patch_lines = old_lines
-        .iter()
-        .map(|line| format!("-{line}"))
-        .chain(new_lines.iter().map(|line| format!("+{line}")))
-        .collect::<Vec<_>>();
-
-    vec![StructuredPatchHunk {
-        old_start: 1,
-        old_lines: old_lines.len(),
-        new_start: 1,
-        new_lines: new_lines.len(),
-        lines: patch_lines,
-    }]
-}
-
 fn run_grep_search_blocking(
     target: &Path,
     input: &GrepInput,
@@ -1554,14 +1496,6 @@ fn resolve_insert_index(
     }
 }
 
-fn collect_lines(content: &str) -> Vec<String> {
-    if content.is_empty() {
-        Vec::new()
-    } else {
-        content.lines().map(ToString::to_string).collect()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GrepRenderedLine {
     path: String,
@@ -1911,11 +1845,39 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.new_string, "during");
+        assert_eq!(output.content, "during after");
         assert_eq!(
             tokio::fs::read_to_string(&file).await.unwrap(),
             "during after"
         );
+
+        let output_json = serde_json::to_value(&output).unwrap();
+        assert_eq!(output_json.as_object().unwrap().len(), 1);
+        assert!(output_json.get("content").is_some());
+    }
+
+    #[tokio::test]
+    async fn write_returns_only_latest_content() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let output = service
+            .write_file(WriteInput {
+                file_path: file.display().to_string(),
+                content: "after".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.content, "after");
+        assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "after");
+
+        let output_json = serde_json::to_value(&output).unwrap();
+        assert_eq!(output_json.as_object().unwrap().len(), 1);
+        assert!(output_json.get("content").is_some());
     }
 
     #[test]
@@ -2164,10 +2126,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(replaced.language, "python");
+        assert_eq!(replaced.content.as_deref(), Some("print('bye')\n"));
         let replaced_json = serde_json::to_value(&replaced).unwrap();
-        assert!(replaced_json.get("original_file").is_none());
-        assert!(replaced_json.get("updated_file").is_none());
+        assert_eq!(replaced_json.as_object().unwrap().len(), 1);
+        assert!(replaced_json.get("content").is_some());
 
         let inserted = service
             .edit_notebook(NotebookEditInput {
@@ -2180,6 +2142,9 @@ mod tests {
             })
             .await
             .unwrap();
+        assert_eq!(inserted.content.as_deref(), Some("# title\n"));
+        let inserted_json = serde_json::to_value(&inserted).unwrap();
+        assert_eq!(inserted_json.as_object().unwrap().len(), 2);
         let inserted_id = inserted.cell_id.clone().unwrap();
 
         let deleted = service
@@ -2193,7 +2158,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(deleted.edit_mode, NotebookEditMode::Delete);
+        assert!(deleted.content.is_none());
+        let deleted_json = serde_json::to_value(&deleted).unwrap();
+        assert!(deleted_json.as_object().unwrap().is_empty());
 
         let notebook = serde_json::from_str::<serde_json::Value>(
             &tokio::fs::read_to_string(&file).await.unwrap(),
@@ -2261,7 +2228,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(replaced.cell_id.as_deref(), Some("cell-b"));
+        assert_eq!(replaced.content.as_deref(), Some("print('bye')\n"));
+        assert!(replaced.cell_id.is_none());
 
         let inserted = service
             .edit_notebook(NotebookEditInput {
@@ -2275,6 +2243,7 @@ mod tests {
             .await
             .unwrap();
         assert!(inserted.cell_id.is_some());
+        assert_eq!(inserted.content.as_deref(), Some("## middle\n"));
 
         let deleted = service
             .edit_notebook(NotebookEditInput {
@@ -2287,7 +2256,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(deleted.cell_id.as_deref(), Some("cell-a"));
+        assert!(deleted.cell_id.is_none());
+        assert!(deleted.content.is_none());
 
         let notebook = serde_json::from_str::<serde_json::Value>(
             &tokio::fs::read_to_string(&file).await.unwrap(),

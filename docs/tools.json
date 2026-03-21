@@ -317,121 +317,13 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "filePath": {
-            "description": "The file path that was edited",
+          "content": {
+            "description": "The latest file content after the edit",
             "type": "string"
-          },
-          "oldString": {
-            "description": "The original string that was replaced",
-            "type": "string"
-          },
-          "newString": {
-            "description": "The new string that replaced it",
-            "type": "string"
-          },
-          "originalFile": {
-            "description": "The original file contents before editing",
-            "type": "string"
-          },
-          "structuredPatch": {
-            "description": "Diff patch showing the changes",
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "oldStart": {
-                  "type": "number"
-                },
-                "oldLines": {
-                  "type": "number"
-                },
-                "newStart": {
-                  "type": "number"
-                },
-                "newLines": {
-                  "type": "number"
-                },
-                "lines": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "oldStart",
-                "oldLines",
-                "newStart",
-                "newLines",
-                "lines"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "userModified": {
-            "description": "Whether the user modified the proposed changes",
-            "type": "boolean"
-          },
-          "replaceAll": {
-            "description": "Whether all occurrences were replaced",
-            "type": "boolean"
-          },
-          "gitDiff": {
-            "type": "object",
-            "properties": {
-              "filename": {
-                "type": "string"
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "modified",
-                  "added"
-                ]
-              },
-              "additions": {
-                "type": "number"
-              },
-              "deletions": {
-                "type": "number"
-              },
-              "changes": {
-                "type": "number"
-              },
-              "patch": {
-                "type": "string"
-              },
-              "repository": {
-                "description": "GitHub owner/repo when available",
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "filename",
-              "status",
-              "additions",
-              "deletions",
-              "changes",
-              "patch"
-            ],
-            "additionalProperties": false
           }
         },
         "required": [
-          "filePath",
-          "oldString",
-          "newString",
-          "originalFile",
-          "structuredPatch",
-          "userModified",
-          "replaceAll"
+          "content"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
@@ -439,7 +331,7 @@
     },
     {
       "name": "Write",
-      "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n- Prefer the Edit tool for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.",
+      "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n- Prefer the Edit tool for targeted changes to existing files. Only use this tool to create new files or for complete rewrites.\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -462,121 +354,13 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "type": {
-            "description": "Whether a new file was created or an existing file was updated",
-            "type": "string",
-            "enum": [
-              "create",
-              "update"
-            ]
-          },
-          "filePath": {
-            "description": "The path to the file that was written",
-            "type": "string"
-          },
           "content": {
-            "description": "The content that was written to the file",
+            "description": "The latest file content after the write",
             "type": "string"
-          },
-          "structuredPatch": {
-            "description": "Diff patch showing the changes",
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "oldStart": {
-                  "type": "number"
-                },
-                "oldLines": {
-                  "type": "number"
-                },
-                "newStart": {
-                  "type": "number"
-                },
-                "newLines": {
-                  "type": "number"
-                },
-                "lines": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "oldStart",
-                "oldLines",
-                "newStart",
-                "newLines",
-                "lines"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "originalFile": {
-            "description": "The original file content before the write (null for new files)",
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "gitDiff": {
-            "type": "object",
-            "properties": {
-              "filename": {
-                "type": "string"
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "modified",
-                  "added"
-                ]
-              },
-              "additions": {
-                "type": "number"
-              },
-              "deletions": {
-                "type": "number"
-              },
-              "changes": {
-                "type": "number"
-              },
-              "patch": {
-                "type": "string"
-              },
-              "repository": {
-                "description": "GitHub owner/repo when available",
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "filename",
-              "status",
-              "additions",
-              "deletions",
-              "changes",
-              "patch"
-            ],
-            "additionalProperties": false
           }
         },
         "required": [
-          "type",
-          "filePath",
-          "content",
-          "structuredPatch"
+          "content"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
@@ -633,46 +417,15 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "new_source": {
-            "description": "The new source code that was written to the cell",
+          "content": {
+            "description": "The latest cell content after the edit",
             "type": "string"
           },
-          "cell_id": {
-            "description": "The ID of the cell that was edited",
-            "type": "string"
-          },
-          "cell_type": {
-            "description": "The type of the cell",
-            "type": "string",
-            "enum": [
-              "code",
-              "markdown"
-            ]
-          },
-          "language": {
-            "description": "The programming language of the notebook",
-            "type": "string"
-          },
-          "edit_mode": {
-            "description": "The edit mode that was used",
-            "type": "string"
-          },
-          "error": {
-            "description": "Error message if the operation failed",
-            "type": "string"
-          },
-          "notebook_path": {
-            "description": "The path to the notebook file",
+          "cellId": {
+            "description": "The ID of a newly inserted cell when one is created",
             "type": "string"
           }
         },
-        "required": [
-          "new_source",
-          "cell_type",
-          "language",
-          "edit_mode",
-          "notebook_path"
-        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       }
