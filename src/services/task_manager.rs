@@ -26,9 +26,6 @@ struct TaskManagerInner {
 
 #[derive(Debug)]
 struct TaskRecord {
-    task_type: String,
-    command: String,
-    description: Option<String>,
     state: RwLock<TaskCompletion>,
     notify: Notify,
     stop_tx: Mutex<Option<oneshot::Sender<()>>>,
@@ -66,11 +63,7 @@ impl TaskCompletion {
 }
 
 impl TaskManager {
-    pub async fn register_shell_task(
-        &self,
-        command: String,
-        description: Option<String>,
-    ) -> String {
+    pub async fn register_shell_task(&self) -> String {
         let id = format!(
             "task-{}",
             self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1
@@ -78,9 +71,6 @@ impl TaskManager {
         let (stop_tx, _stop_rx) = oneshot::channel::<()>();
 
         let task = Arc::new(TaskRecord {
-            task_type: "bash".to_string(),
-            command,
-            description,
             state: RwLock::new(TaskCompletion::running()),
             notify: Notify::new(),
             stop_tx: Mutex::new(Some(stop_tx)),
@@ -121,17 +111,9 @@ impl TaskManager {
 
         let state = task.state.read().await.clone();
         Ok(TaskOutputResponse {
-            task_id: input.task_id,
             status: state.status,
-            task_type: task.task_type.clone(),
-            command: task
-                .description
-                .clone()
-                .unwrap_or_else(|| task.command.clone()),
             stdout: state.stdout,
             stderr: state.stderr,
-            interrupted: state.interrupted,
-            completed: state.completed,
         })
     }
 
@@ -141,13 +123,6 @@ impl TaskManager {
         if current.completed {
             return Ok(TaskStopOutput {
                 message: "Task already completed.".to_string(),
-                task_id: task_id.to_string(),
-                task_type: task.task_type.clone(),
-                command: Some(
-                    task.description
-                        .clone()
-                        .unwrap_or_else(|| task.command.clone()),
-                ),
             });
         }
 
@@ -158,13 +133,6 @@ impl TaskManager {
 
         Ok(TaskStopOutput {
             message: "Stop signal sent.".to_string(),
-            task_id: task_id.to_string(),
-            task_type: task.task_type.clone(),
-            command: Some(
-                task.description
-                    .clone()
-                    .unwrap_or_else(|| task.command.clone()),
-            ),
         })
     }
 

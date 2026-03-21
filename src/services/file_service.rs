@@ -3,7 +3,6 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -234,7 +233,6 @@ impl FileService {
     }
 
     pub fn glob_files(&self, input: GlobInput) -> Result<GlobOutput> {
-        let started_at = Instant::now();
         let root = self.resolve_search_root(input.path.as_deref())?;
         let walker = GlobWalkerBuilder::from_patterns(&root, &[input.pattern.as_str()])
             .build()
@@ -264,7 +262,6 @@ impl FileService {
             .collect::<Vec<_>>();
 
         Ok(GlobOutput {
-            duration_ms: started_at.elapsed().as_millis(),
             num_files: total,
             filenames,
             truncated,

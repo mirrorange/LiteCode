@@ -58,24 +58,12 @@ impl ProcessService {
         if let Some(path) = outcome.final_working_dir {
             self.set_working_dir(path);
         }
-        let return_code_interpretation = outcome.return_code.map(describe_return_code);
-        let no_output_expected = outcome.stdout.is_empty() && outcome.stderr.is_empty();
 
         Ok(BashOutput {
-            stdout: outcome.stdout,
-            stderr: outcome.stderr,
-            interrupted: outcome.interrupted,
-            raw_output_path: None,
-            is_image: Some(false),
+            stdout: Some(outcome.stdout),
+            stderr: Some(outcome.stderr),
+            interrupted: Some(outcome.interrupted),
             background_task_id: None,
-            backgrounded_by_user: Some(false),
-            assistant_auto_backgrounded: Some(false),
-            return_code_interpretation,
-            no_output_expected: Some(no_output_expected),
-            structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
-            token_saver_output: None,
         })
     }
 
@@ -86,11 +74,7 @@ impl ProcessService {
         task_manager: &TaskManager,
     ) -> Result<BashOutput> {
         let child = self.spawn_shell(&input.command)?;
-        let command = input.command.clone();
-        let description = input.description.clone();
-        let task_id = task_manager
-            .register_shell_task(command.clone(), description)
-            .await;
+        let task_id = task_manager.register_shell_task().await;
 
         let working_dir = self.working_dir.clone();
         let manager = task_manager.clone();
@@ -124,20 +108,10 @@ impl ProcessService {
         });
 
         Ok(BashOutput {
-            stdout: String::new(),
-            stderr: String::new(),
-            interrupted: false,
-            raw_output_path: None,
-            is_image: Some(false),
+            stdout: None,
+            stderr: None,
+            interrupted: None,
             background_task_id: Some(task_id),
-            backgrounded_by_user: Some(false),
-            assistant_auto_backgrounded: Some(false),
-            return_code_interpretation: None,
-            no_output_expected: Some(true),
-            structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
-            token_saver_output: None,
         })
     }
 
@@ -167,7 +141,6 @@ struct ProcessOutcome {
     stdout: String,
     stderr: String,
     interrupted: bool,
-    return_code: Option<i32>,
     final_working_dir: Option<PathBuf>,
 }
 
@@ -210,7 +183,7 @@ async fn wait_for_child(
         }
     };
 
-    let (status, interrupted) = match timeout(duration, wait_future).await {
+    let (_status, interrupted) = match timeout(duration, wait_future).await {
         Ok(result) => result?,
         Err(_) => {
             let _ = child.kill().await;
@@ -226,7 +199,6 @@ async fn wait_for_child(
         stdout,
         stderr,
         interrupted,
-        return_code: status.code(),
         final_working_dir,
     })
 }
@@ -248,19 +220,11 @@ fn extract_working_dir(stdout: &str) -> (String, Option<PathBuf>) {
     }
 }
 
-fn describe_return_code(code: i32) -> String {
-    match code {
-        0 => "Command completed successfully".to_string(),
-        124 => "Command timed out".to_string(),
-        130 => "Command was interrupted".to_string(),
-        other => format!("Command exited with code {other}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use serde_json::{Value, to_value};
     use tempfile::tempdir;
 
     use crate::{
@@ -291,8 +255,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(output.stdout.contains(nested.to_string_lossy().as_ref()));
+        assert!(
+            output
+                .stdout
+                .as_deref()
+                .unwrap()
+                .contains(nested.to_string_lossy().as_ref())
+        );
         assert_eq!(service.working_dir(), nested);
+
+        let keys = object_keys(&to_value(&output).unwrap());
+        assert_eq!(keys, vec!["interrupted", "stderr", "stdout"]);
     }
 
     #[tokio::test]
@@ -314,6 +287,9 @@ mod tests {
             .await
             .unwrap();
 
+        let keys = object_keys(&to_value(&output).unwrap());
+        assert_eq!(keys, vec!["backgroundTaskId"]);
+
         let task_id = output.background_task_id.unwrap();
         let status = tasks
             .task_output(TaskOutputInput {
@@ -326,6 +302,9 @@ mod tests {
 
         assert_eq!(status.status, "completed");
         assert!(status.stdout.contains("ready"));
+
+        let keys = object_keys(&to_value(&status).unwrap());
+        assert_eq!(keys, vec!["status", "stderr", "stdout"]);
     }
 
     #[tokio::test]
@@ -350,6 +329,8 @@ mod tests {
         let task_id = output.background_task_id.unwrap();
         let stop = tasks.stop_task(&task_id).await.unwrap();
         assert_eq!(stop.message, "Stop signal sent.");
+        let keys = object_keys(&to_value(&stop).unwrap());
+        assert_eq!(keys, vec!["message"]);
 
         let status = tasks
             .task_output(TaskOutputInput {
@@ -361,7 +342,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(status.status, "stopped");
-        assert!(status.interrupted);
-        assert!(status.completed);
+        let keys = object_keys(&to_value(&status).unwrap());
+        assert_eq!(keys, vec!["status", "stderr", "stdout"]);
+    }
+
+    fn object_keys(value: &Value) -> Vec<String> {
+        let mut keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
     }
 }

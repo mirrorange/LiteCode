@@ -1,6 +1,5 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -206,9 +205,6 @@ pub struct EditOutput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GlobOutput {
-    /// Time taken to execute the search in milliseconds
-    #[serde(rename = "durationMs")]
-    pub duration_ms: u128,
     /// Total number of files found
     #[serde(rename = "numFiles")]
     pub num_files: usize,
@@ -271,56 +267,17 @@ pub struct BashInput {
 #[serde(deny_unknown_fields)]
 pub struct BashOutput {
     /// The standard output of the command
-    pub stdout: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
     /// The standard error output of the command
-    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
     /// Whether the command was interrupted
-    pub interrupted: bool,
-    /// Path to raw output file for large MCP tool outputs
-    #[serde(rename = "rawOutputPath", skip_serializing_if = "Option::is_none")]
-    pub raw_output_path: Option<String>,
-    /// Flag to indicate if stdout contains image data
-    #[serde(rename = "isImage", skip_serializing_if = "Option::is_none")]
-    pub is_image: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted: Option<bool>,
     /// ID of the background task if command is running in background
     #[serde(rename = "backgroundTaskId", skip_serializing_if = "Option::is_none")]
     pub background_task_id: Option<String>,
-    /// True if the user manually backgrounded the command with Ctrl+B
-    #[serde(rename = "backgroundedByUser", skip_serializing_if = "Option::is_none")]
-    pub backgrounded_by_user: Option<bool>,
-    /// True if assistant-mode auto-backgrounded a long-running blocking command
-    #[serde(
-        rename = "assistantAutoBackgrounded",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub assistant_auto_backgrounded: Option<bool>,
-    /// Semantic interpretation for non-error exit codes with special meaning
-    #[serde(
-        rename = "returnCodeInterpretation",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub return_code_interpretation: Option<String>,
-    /// Whether the command is expected to produce no output on success
-    #[serde(rename = "noOutputExpected", skip_serializing_if = "Option::is_none")]
-    pub no_output_expected: Option<bool>,
-    /// Structured content blocks
-    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
-    pub structured_content: Option<Vec<Value>>,
-    /// Path to the persisted full output in tool-results dir (set when output is too large for inline)
-    #[serde(
-        rename = "persistedOutputPath",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub persisted_output_path: Option<String>,
-    /// Total size of the output in bytes (set when output is too large for inline)
-    #[serde(
-        rename = "persistedOutputSize",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub persisted_output_size: Option<u64>,
-    /// Compressed output sent to model when token-saver is active (UI still uses stdout)
-    #[serde(rename = "tokenSaverOutput", skip_serializing_if = "Option::is_none")]
-    pub token_saver_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -341,16 +298,9 @@ pub struct TaskOutputInput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskOutputResponse {
-    #[serde(rename = "taskId")]
-    pub task_id: String,
     pub status: String,
-    #[serde(rename = "taskType")]
-    pub task_type: String,
-    pub command: String,
     pub stdout: String,
     pub stderr: String,
-    pub interrupted: bool,
-    pub completed: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -367,13 +317,6 @@ pub struct TaskStopInput {
 pub struct TaskStopOutput {
     /// Status message about the operation
     pub message: String,
-    /// The ID of the task that was stopped
-    pub task_id: String,
-    /// The type of the task that was stopped
-    pub task_type: String,
-    /// The command or description of the stopped task
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]

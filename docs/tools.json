@@ -72,61 +72,15 @@
             "description": "The standard error output of the command",
             "type": "string"
           },
-          "rawOutputPath": {
-            "description": "Path to raw output file for large MCP tool outputs",
-            "type": "string"
-          },
           "interrupted": {
             "description": "Whether the command was interrupted",
-            "type": "boolean"
-          },
-          "isImage": {
-            "description": "Flag to indicate if stdout contains image data",
             "type": "boolean"
           },
           "backgroundTaskId": {
             "description": "ID of the background task if command is running in background",
             "type": "string"
-          },
-          "backgroundedByUser": {
-            "description": "True if the user manually backgrounded the command with Ctrl+B",
-            "type": "boolean"
-          },
-          "assistantAutoBackgrounded": {
-            "description": "True if assistant-mode auto-backgrounded a long-running blocking command",
-            "type": "boolean"
-          },
-          "returnCodeInterpretation": {
-            "description": "Semantic interpretation for non-error exit codes with special meaning",
-            "type": "string"
-          },
-          "noOutputExpected": {
-            "description": "Whether the command is expected to produce no output on success",
-            "type": "boolean"
-          },
-          "structuredContent": {
-            "description": "Structured content blocks",
-            "type": "array",
-            "items": {}
-          },
-          "persistedOutputPath": {
-            "description": "Path to the persisted full output in tool-results dir (set when output is too large for inline)",
-            "type": "string"
-          },
-          "persistedOutputSize": {
-            "description": "Total size of the output in bytes (set when output is too large for inline)",
-            "type": "number"
-          },
-          "tokenSaverOutput": {
-            "description": "Compressed output sent to model when token-saver is active (UI still uses stdout)",
-            "type": "string"
           }
         },
-        "required": [
-          "stdout",
-          "stderr",
-          "interrupted"
-        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       }
@@ -155,10 +109,6 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "durationMs": {
-            "description": "Time taken to execute the search in milliseconds",
-            "type": "number"
-          },
           "numFiles": {
             "description": "Total number of files found",
             "type": "number"
@@ -176,7 +126,6 @@
           }
         },
         "required": [
-          "durationMs",
           "numFiles",
           "filenames",
           "truncated"
@@ -752,24 +701,10 @@
           "message": {
             "description": "Status message about the operation",
             "type": "string"
-          },
-          "task_id": {
-            "description": "The ID of the task that was stopped",
-            "type": "string"
-          },
-          "task_type": {
-            "description": "The type of the task that was stopped",
-            "type": "string"
-          },
-          "command": {
-            "description": "The command or description of the stopped task",
-            "type": "string"
           }
         },
         "required": [
-          "message",
-          "task_id",
-          "task_type"
+          "message"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
