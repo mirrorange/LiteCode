@@ -350,14 +350,6 @@ impl FileService {
     }
 
     pub async fn edit_notebook(&self, input: NotebookEditInput) -> Result<NotebookEditOutput> {
-        self.edit_notebook_with_cell_number(input, None).await
-    }
-
-    pub async fn edit_notebook_with_cell_number(
-        &self,
-        input: NotebookEditInput,
-        cell_number: Option<usize>,
-    ) -> Result<NotebookEditOutput> {
         let path = self.require_absolute_file(Path::new(&input.notebook_path))?;
         if path.extension().and_then(|value| value.to_str()) != Some("ipynb") {
             return Err(LiteCodeError::invalid_input(format!(
@@ -383,8 +375,7 @@ impl FileService {
                 let ResolvedNotebookCell { index, cell_id } = resolve_notebook_cell(
                     cells,
                     input.cell_id.as_deref(),
-                    cell_number,
-                    false,
+                    input.cell_number,
                     "replace",
                 )?;
                 let cell = cells
@@ -420,7 +411,8 @@ impl FileService {
                 })?;
                 let cell_id = generated_cell_id();
                 let new_cell = new_notebook_cell(&cell_id, cell_type, &input.new_source);
-                let index = resolve_insert_index(cells, input.cell_id.as_deref(), cell_number)?;
+                let index =
+                    resolve_insert_index(cells, input.cell_id.as_deref(), input.cell_number)?;
                 cells.insert(index, new_cell);
 
                 NotebookEditOutput {
@@ -439,8 +431,7 @@ impl FileService {
                 let ResolvedNotebookCell { index, cell_id } = resolve_notebook_cell(
                     cells,
                     input.cell_id.as_deref(),
-                    cell_number,
-                    false,
+                    input.cell_number,
                     "delete",
                 )?;
                 let removed = cells.remove(index);
@@ -562,45 +553,123 @@ impl FileService {
 }
 
 fn render_notebook(content: &str) -> Result<String> {
-    let json = serde_json::from_str::<serde_json::Value>(content)
+    let notebook = serde_json::from_str::<serde_json::Value>(content)
         .map_err(|error| LiteCodeError::invalid_input(format!("Invalid notebook JSON: {error}")))?;
-    let cells = json
+    let language = notebook_language(&notebook);
+    let cells = notebook
         .get("cells")
         .and_then(|value| value.as_array())
         .ok_or_else(|| LiteCodeError::invalid_input("Notebook does not contain a cells array."))?;
 
-    let mut rendered = Vec::new();
-    for (index, cell) in cells.iter().enumerate() {
-        let cell_type = cell
-            .get("cell_type")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown");
-        let source = value_as_lines(cell.get("source")).join("");
-        let outputs = cell
-            .get("outputs")
-            .and_then(|value| value.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| {
-                        serde_json::to_string_pretty(item).unwrap_or_else(|_| item.to_string())
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
+    Ok(cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| render_notebook_cell(cell, index, &language))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
 
-        rendered.push(format!(
-            "Cell {index} [{cell_type}]\n{source}{}",
-            if outputs.is_empty() {
-                String::new()
+fn render_notebook_cell(cell: &serde_json::Value, index: usize, language: &str) -> String {
+    let mut header = format!("<cell number=\"{index}\"");
+    if let Some(cell_id) = cell.get("id").and_then(|value| value.as_str()) {
+        header.push_str(&format!(" id=\"{cell_id}\""));
+    }
+    header.push('>');
+
+    let cell_type = cell
+        .get("cell_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let source = value_as_lines(cell.get("source")).join("");
+
+    let mut lines = vec![header, format!("<cell_type>{cell_type}</cell_type>")];
+    if cell_type == "code" {
+        lines.push(format!("<language>{language}</language>"));
+    }
+    push_tag_block(&mut lines, "source", &source);
+
+    if let Some(outputs) = cell.get("outputs").and_then(|value| value.as_array()) {
+        if !outputs.is_empty() {
+            lines.push("<outputs>".to_string());
+            if outputs.len() == 1 {
+                lines.extend(render_output_fields(&outputs[0]));
             } else {
-                format!("\n[outputs]\n{outputs}")
+                for (output_index, output) in outputs.iter().enumerate() {
+                    lines.push(format!("<output number=\"{output_index}\">"));
+                    lines.extend(render_output_fields(output));
+                    lines.push("</output>".to_string());
+                }
             }
-        ));
+            lines.push("</outputs>".to_string());
+        }
     }
 
-    Ok(rendered.join("\n\n"))
+    lines.push("</cell>".to_string());
+    lines.join("\n")
+}
+
+fn render_output_fields(output: &serde_json::Value) -> Vec<String> {
+    let Some(output) = output.as_object() else {
+        let mut lines = Vec::new();
+        push_tag_block(
+            &mut lines,
+            "output",
+            &serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string()),
+        );
+        return lines;
+    };
+
+    let mut keys = output.keys().cloned().collect::<Vec<_>>();
+    keys.sort_by(|left, right| output_field_order(left).cmp(&output_field_order(right)));
+
+    let mut lines = Vec::new();
+    for key in keys {
+        let value = output.get(&key).expect("output field should exist");
+        push_tag_block(&mut lines, &key, &render_tag_value(value));
+    }
+    lines
+}
+
+fn output_field_order(key: &str) -> (usize, &str) {
+    let rank = match key {
+        "output_type" => 0,
+        "name" => 1,
+        "execution_count" => 2,
+        "text" => 3,
+        "data" => 4,
+        "ename" => 5,
+        "evalue" => 6,
+        "traceback" => 7,
+        _ => 8,
+    };
+    (rank, key)
+}
+
+fn render_tag_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(_) => value_as_lines(Some(value)).join(""),
+        serde_json::Value::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+    }
+}
+
+fn push_tag_block(lines: &mut Vec<String>, tag: &str, content: &str) {
+    if !content.contains('\n') {
+        lines.push(format!("<{tag}>{content}</{tag}>"));
+        return;
+    }
+
+    lines.push(format!("<{tag}>"));
+    let block = content.strip_suffix('\n').unwrap_or(content);
+    if !block.is_empty() {
+        lines.extend(block.lines().map(ToString::to_string));
+    }
+    lines.push(format!("</{tag}>"));
 }
 
 async fn read_pdf_text(path: &Path, pages: Option<&str>) -> Result<String> {
@@ -1187,43 +1256,59 @@ fn resolve_notebook_cell(
     cells: &[serde_json::Value],
     cell_id: Option<&str>,
     cell_number: Option<usize>,
-    allow_end: bool,
     operation: &str,
 ) -> Result<ResolvedNotebookCell> {
-    if let Some(index) = cell_number {
-        let max_index = if allow_end {
-            cells.len()
-        } else {
-            cells.len().saturating_sub(1)
-        };
-        if index > max_index || (!allow_end && index >= cells.len()) {
-            return Err(LiteCodeError::invalid_input(format!(
-                "NotebookEdit {operation} mode requires cell_number to be within 0..{}.",
-                if allow_end { cells.len() } else { max_index }
-            )));
-        }
+    let resolved_from_id = match cell_id {
+        Some(cell_id) => Some((find_cell_index(cells, cell_id)?, cell_id.to_string())),
+        None => None,
+    };
+    let resolved_from_number = match cell_number {
+        Some(index) => Some((index, resolve_numbered_cell(cells, index, operation)?)),
+        None => None,
+    };
 
-        let resolved_cell_id = cells
-            .get(index)
-            .and_then(|cell| cell.get("id"))
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string);
-        return Ok(ResolvedNotebookCell {
+    match (resolved_from_id, resolved_from_number) {
+        (Some((id_index, id)), Some((number_index, number_cell_id))) => {
+            if id_index != number_index || number_cell_id.as_deref() != Some(id.as_str()) {
+                return Err(LiteCodeError::invalid_input(format!(
+                    "NotebookEdit {operation} mode received conflicting cell_id and cell_number."
+                )));
+            }
+
+            Ok(ResolvedNotebookCell {
+                index: id_index,
+                cell_id: Some(id),
+            })
+        }
+        (Some((index, id)), None) => Ok(ResolvedNotebookCell {
             index,
-            cell_id: resolved_cell_id,
-        });
+            cell_id: Some(id),
+        }),
+        (None, Some((index, cell_id))) => Ok(ResolvedNotebookCell { index, cell_id }),
+        (None, None) => Err(LiteCodeError::invalid_input(format!(
+            "NotebookEdit {operation} mode requires cell_id or cell_number."
+        ))),
+    }
+}
+
+fn resolve_numbered_cell(
+    cells: &[serde_json::Value],
+    index: usize,
+    operation: &str,
+) -> Result<Option<String>> {
+    let max_index = cells.len().saturating_sub(1);
+    if index >= cells.len() {
+        return Err(LiteCodeError::invalid_input(format!(
+            "NotebookEdit {operation} mode requires cell_number to be within 0..{}.",
+            max_index
+        )));
     }
 
-    let cell_id = cell_id.ok_or_else(|| {
-        LiteCodeError::invalid_input(format!(
-            "NotebookEdit {operation} mode requires cell_id or cell_number."
-        ))
-    })?;
-    let index = find_cell_index(cells, cell_id)?;
-    Ok(ResolvedNotebookCell {
-        index,
-        cell_id: Some(cell_id.to_string()),
-    })
+    Ok(cells
+        .get(index)
+        .and_then(|cell| cell.get("id"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string))
 }
 
 fn resolve_insert_index(
@@ -1231,19 +1316,34 @@ fn resolve_insert_index(
     cell_id: Option<&str>,
     cell_number: Option<usize>,
 ) -> Result<usize> {
-    if let Some(index) = cell_number {
-        if index > cells.len() {
-            return Err(LiteCodeError::invalid_input(format!(
-                "NotebookEdit insert mode requires cell_number to be within 0..{}.",
-                cells.len()
-            )));
+    let index_from_id = match cell_id {
+        Some(existing_id) => Some(find_cell_index(cells, existing_id)? + 1),
+        None => None,
+    };
+    let index_from_number = match cell_number {
+        Some(index) => {
+            if index > cells.len() {
+                return Err(LiteCodeError::invalid_input(format!(
+                    "NotebookEdit insert mode requires cell_number to be within 0..{}.",
+                    cells.len()
+                )));
+            }
+            Some(index)
         }
-        return Ok(index);
-    }
+        None => None,
+    };
 
-    match cell_id {
-        Some(existing_id) => Ok(find_cell_index(cells, existing_id)? + 1),
-        None => Ok(0),
+    match (index_from_id, index_from_number) {
+        (Some(id_index), Some(number_index)) => {
+            if id_index != number_index {
+                return Err(LiteCodeError::invalid_input(
+                    "NotebookEdit insert mode received conflicting cell_id and cell_number.",
+                ));
+            }
+            Ok(id_index)
+        }
+        (Some(index), None) | (None, Some(index)) => Ok(index),
+        (None, None) => Ok(0),
     }
 }
 
@@ -1375,6 +1475,63 @@ mod tests {
                 .to_string()
                 .contains("must provide the pages parameter")
         );
+    }
+
+    #[tokio::test]
+    async fn read_formats_notebooks_like_structured_cells() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.ipynb");
+        let notebook = serde_json::json!({
+            "cells": [
+                {
+                    "id": "cell-a",
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["# Heading\n", "\n", "Body text.\n"]
+                },
+                {
+                    "id": "cell-b",
+                    "cell_type": "code",
+                    "metadata": {},
+                    "execution_count": 1,
+                    "outputs": [
+                        {
+                            "output_type": "stream",
+                            "name": "stdout",
+                            "text": ["hello\n"]
+                        }
+                    ],
+                    "source": ["print('hello')\n"]
+                }
+            ],
+            "metadata": {
+                "language_info": { "name": "python" }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        tokio::fs::write(&file, serde_json::to_string_pretty(&notebook).unwrap())
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let content = service.read_file(&file, None, None, None).await.unwrap();
+
+        let ReadFileOutput::Text(text) = content else {
+            panic!("expected text output");
+        };
+        assert!(text.contains("<cell number=\"0\" id=\"cell-a\">"));
+        assert!(text.contains("<cell_type>markdown</cell_type>"));
+        assert!(text.contains("<source>"));
+        assert!(text.contains("# Heading"));
+        assert!(text.contains("<cell number=\"1\" id=\"cell-b\">"));
+        assert!(text.contains("<language>python</language>"));
+        assert!(text.contains("<outputs>"));
+        assert!(text.contains("<output_type>stream</output_type>"));
+        assert!(text.contains("<text>"));
+        assert!(!text.contains("Cell 0 [markdown]"));
     }
 
     #[tokio::test]
@@ -1684,6 +1841,7 @@ mod tests {
             .edit_notebook(NotebookEditInput {
                 notebook_path: file.display().to_string(),
                 cell_id: Some("cell-a".to_string()),
+                cell_number: None,
                 new_source: "print('bye')\n".to_string(),
                 cell_type: None,
                 edit_mode: NotebookEditMode::Replace,
@@ -1696,6 +1854,7 @@ mod tests {
             .edit_notebook(NotebookEditInput {
                 notebook_path: file.display().to_string(),
                 cell_id: Some("cell-a".to_string()),
+                cell_number: None,
                 new_source: "# title\n".to_string(),
                 cell_type: Some(NotebookCellType::Markdown),
                 edit_mode: NotebookEditMode::Insert,
@@ -1708,6 +1867,7 @@ mod tests {
             .edit_notebook(NotebookEditInput {
                 notebook_path: file.display().to_string(),
                 cell_id: Some(inserted_id),
+                cell_number: None,
                 new_source: String::new(),
                 cell_type: None,
                 edit_mode: NotebookEditMode::Delete,
@@ -1772,46 +1932,40 @@ mod tests {
         )));
 
         let replaced = service
-            .edit_notebook_with_cell_number(
-                NotebookEditInput {
-                    notebook_path: file.display().to_string(),
-                    cell_id: None,
-                    new_source: "print('bye')\n".to_string(),
-                    cell_type: None,
-                    edit_mode: NotebookEditMode::Replace,
-                },
-                Some(1),
-            )
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: None,
+                cell_number: Some(1),
+                new_source: "print('bye')\n".to_string(),
+                cell_type: None,
+                edit_mode: NotebookEditMode::Replace,
+            })
             .await
             .unwrap();
         assert_eq!(replaced.cell_id.as_deref(), Some("cell-b"));
 
         let inserted = service
-            .edit_notebook_with_cell_number(
-                NotebookEditInput {
-                    notebook_path: file.display().to_string(),
-                    cell_id: None,
-                    new_source: "## middle\n".to_string(),
-                    cell_type: Some(NotebookCellType::Markdown),
-                    edit_mode: NotebookEditMode::Insert,
-                },
-                Some(1),
-            )
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: None,
+                cell_number: Some(1),
+                new_source: "## middle\n".to_string(),
+                cell_type: Some(NotebookCellType::Markdown),
+                edit_mode: NotebookEditMode::Insert,
+            })
             .await
             .unwrap();
         assert!(inserted.cell_id.is_some());
 
         let deleted = service
-            .edit_notebook_with_cell_number(
-                NotebookEditInput {
-                    notebook_path: file.display().to_string(),
-                    cell_id: None,
-                    new_source: String::new(),
-                    cell_type: None,
-                    edit_mode: NotebookEditMode::Delete,
-                },
-                Some(0),
-            )
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: None,
+                cell_number: Some(0),
+                new_source: String::new(),
+                cell_type: None,
+                edit_mode: NotebookEditMode::Delete,
+            })
             .await
             .unwrap();
         assert_eq!(deleted.cell_id.as_deref(), Some("cell-a"));
@@ -1842,6 +1996,76 @@ mod tests {
                 .as_str()
                 .unwrap(),
             "print('bye')\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn notebook_edit_rejects_conflicting_cell_selectors() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.ipynb");
+        let original = serde_json::json!({
+            "cells": [
+                {
+                    "id": "cell-a",
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["# heading\n"]
+                },
+                {
+                    "id": "cell-b",
+                    "cell_type": "code",
+                    "metadata": {},
+                    "execution_count": null,
+                    "outputs": [],
+                    "source": ["print('hi')\n"]
+                }
+            ],
+            "metadata": {
+                "language_info": { "name": "python" }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        tokio::fs::write(&file, serde_json::to_string_pretty(&original).unwrap())
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+
+        let replace_error = service
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: Some("cell-b".to_string()),
+                cell_number: Some(0),
+                new_source: "print('bye')\n".to_string(),
+                cell_type: None,
+                edit_mode: NotebookEditMode::Replace,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            replace_error
+                .to_string()
+                .contains("conflicting cell_id and cell_number")
+        );
+
+        let insert_error = service
+            .edit_notebook(NotebookEditInput {
+                notebook_path: file.display().to_string(),
+                cell_id: Some("cell-b".to_string()),
+                cell_number: Some(0),
+                new_source: "## before\n".to_string(),
+                cell_type: Some(NotebookCellType::Markdown),
+                edit_mode: NotebookEditMode::Insert,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            insert_error
+                .to_string()
+                .contains("conflicting cell_id and cell_number")
         );
     }
 

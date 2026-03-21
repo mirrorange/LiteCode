@@ -403,8 +403,10 @@ impl Default for NotebookEditMode {
 pub struct NotebookEditInput {
     /// The absolute path to the Jupyter notebook file to edit (must be absolute, not relative)
     pub notebook_path: String,
-    /// The ID of the cell to edit. When inserting a new cell, the new cell will be inserted after the cell with this ID, or at the beginning if not specified.
+    /// The ID of the target cell. Use this or cell_number. If both are provided, they must refer to the same cell, or the same insertion point in insert mode.
     pub cell_id: Option<String>,
+    /// The 0-indexed number of the target cell. Use this or cell_id. In insert mode, the new cell is inserted at this index.
+    pub cell_number: Option<usize>,
     /// The new source for the cell
     pub new_source: String,
     /// The type of the cell (code or markdown). If not specified, it defaults to the current cell type. If using edit_mode=insert, this is required.
