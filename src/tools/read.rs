@@ -10,7 +10,11 @@ use rmcp::{
     model::{CallToolResult, Content, Tool},
 };
 
-use crate::{schema::ReadInput, server::LiteCodeServer, services::file_service::ReadFileOutput};
+use crate::{
+    schema::ReadInput,
+    server::LiteCodeServer,
+    services::file_service::{ReadContent, ReadFileOutput},
+};
 
 const READ_DESCRIPTION: &str = r#"Reads a file from the local filesystem. You can access any file directly by using this tool.
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
@@ -61,6 +65,17 @@ impl ReadFileOutput {
             ReadFileOutput::Image { data, mime_type } => {
                 CallToolResult::success(vec![Content::image(STANDARD.encode(data), mime_type)])
             }
+            ReadFileOutput::Contents(contents) => CallToolResult::success(
+                contents
+                    .into_iter()
+                    .map(|content| match content {
+                        ReadContent::Text(text) => Content::text(text),
+                        ReadContent::Image { data, mime_type } => {
+                            Content::image(STANDARD.encode(data), mime_type)
+                        }
+                    })
+                    .collect(),
+            ),
         }
     }
 }

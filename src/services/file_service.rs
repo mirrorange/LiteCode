@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use globwalk::GlobWalkerBuilder;
 use grep::{
     matcher::Matcher,
@@ -30,6 +31,13 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadFileOutput {
+    Text(String),
+    Image { data: Vec<u8>, mime_type: String },
+    Contents(Vec<ReadContent>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadContent {
     Text(String),
     Image { data: Vec<u8>, mime_type: String },
 }
@@ -98,11 +106,19 @@ impl FileService {
             });
         }
 
-        let text = if path.extension().and_then(|value| value.to_str()) == Some("ipynb") {
-            render_notebook(&String::from_utf8_lossy(&raw))?
-        } else {
-            String::from_utf8_lossy(&raw).into_owned()
-        };
+        if path.extension().and_then(|value| value.to_str()) == Some("ipynb") {
+            let content = render_notebook(&String::from_utf8_lossy(&raw))?;
+            self.mark_read(&path);
+
+            return Ok(match content {
+                ReadFileOutput::Text(text) if text.is_empty() => {
+                    ReadFileOutput::Text("Warning: file exists but is empty.".to_string())
+                }
+                other => other,
+            });
+        }
+
+        let text = String::from_utf8_lossy(&raw).into_owned();
 
         self.mark_read(&path);
 
@@ -543,7 +559,50 @@ impl FileService {
     }
 }
 
-fn render_notebook(content: &str) -> Result<String> {
+const NOTEBOOK_OUTPUT_TEXT_CHAR_LIMIT: usize = 4_000;
+const NOTEBOOK_OUTPUT_TRUNCATION_NOTICE: &str = "[output truncated for readability. Use Bash with cat and jq on the .ipynb file to inspect the full output.]";
+
+#[derive(Default)]
+struct NotebookRenderBuilder {
+    parts: Vec<ReadContent>,
+    text_lines: Vec<String>,
+}
+
+#[derive(Debug)]
+struct NotebookEmbeddedMedia {
+    data: Vec<u8>,
+    mime_type: String,
+}
+
+impl NotebookRenderBuilder {
+    fn push_line(&mut self, line: impl Into<String>) {
+        self.text_lines.push(line.into());
+    }
+
+    fn push_image(&mut self, data: Vec<u8>, mime_type: String) {
+        self.flush_text();
+        self.parts.push(ReadContent::Image { data, mime_type });
+    }
+
+    fn finish(mut self) -> Vec<ReadContent> {
+        self.flush_text();
+        self.parts
+    }
+
+    fn flush_text(&mut self) {
+        if self.text_lines.is_empty() {
+            return;
+        }
+
+        push_text_part(
+            &mut self.parts,
+            ReadContent::Text(self.text_lines.join("\n")),
+        );
+        self.text_lines.clear();
+    }
+}
+
+fn render_notebook(content: &str) -> Result<ReadFileOutput> {
     let notebook = serde_json::from_str::<serde_json::Value>(content)
         .map_err(|error| LiteCodeError::invalid_input(format!("Invalid notebook JSON: {error}")))?;
     let language = notebook_language(&notebook);
@@ -552,15 +611,24 @@ fn render_notebook(content: &str) -> Result<String> {
         .and_then(|value| value.as_array())
         .ok_or_else(|| LiteCodeError::invalid_input("Notebook does not contain a cells array."))?;
 
-    Ok(cells
-        .iter()
-        .enumerate()
-        .map(|(index, cell)| render_notebook_cell(cell, index, &language))
-        .collect::<Vec<_>>()
-        .join("\n"))
+    let mut parts = Vec::new();
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            push_text_part(&mut parts, ReadContent::Text("\n".to_string()));
+        }
+        for part in render_notebook_cell(cell, index, &language) {
+            push_text_part(&mut parts, part);
+        }
+    }
+
+    Ok(normalize_read_contents(parts))
 }
 
-fn render_notebook_cell(cell: &serde_json::Value, index: usize, language: &str) -> String {
+fn render_notebook_cell(
+    cell: &serde_json::Value,
+    index: usize,
+    language: &str,
+) -> Vec<ReadContent> {
     let mut header = format!("<cell number=\"{index}\"");
     if let Some(cell_id) = cell.get("id").and_then(|value| value.as_str()) {
         header.push_str(&format!(" id=\"{cell_id}\""));
@@ -573,52 +641,64 @@ fn render_notebook_cell(cell: &serde_json::Value, index: usize, language: &str) 
         .unwrap_or("unknown");
     let source = value_as_lines(cell.get("source")).join("");
 
-    let mut lines = vec![header, format!("<cell_type>{cell_type}</cell_type>")];
+    let mut builder = NotebookRenderBuilder::default();
+    builder.push_line(header);
+    builder.push_line(format!("<cell_type>{cell_type}</cell_type>"));
     if cell_type == "code" {
-        lines.push(format!("<language>{language}</language>"));
+        builder.push_line(format!("<language>{language}</language>"));
     }
-    push_tag_block(&mut lines, "source", &source);
+    push_tag_block(&mut builder, "source", &source);
 
     if let Some(outputs) = cell.get("outputs").and_then(|value| value.as_array()) {
         if !outputs.is_empty() {
-            lines.push("<outputs>".to_string());
+            builder.push_line("<outputs>");
             if outputs.len() == 1 {
-                lines.extend(render_output_fields(&outputs[0]));
+                render_output(&mut builder, &outputs[0], None);
             } else {
                 for (output_index, output) in outputs.iter().enumerate() {
-                    lines.push(format!("<output number=\"{output_index}\">"));
-                    lines.extend(render_output_fields(output));
-                    lines.push("</output>".to_string());
+                    render_output(&mut builder, output, Some(output_index));
                 }
             }
-            lines.push("</outputs>".to_string());
+            builder.push_line("</outputs>");
         }
     }
 
-    lines.push("</cell>".to_string());
-    lines.join("\n")
+    builder.push_line("</cell>");
+    builder.finish()
 }
 
-fn render_output_fields(output: &serde_json::Value) -> Vec<String> {
+fn render_output(
+    builder: &mut NotebookRenderBuilder,
+    output: &serde_json::Value,
+    index: Option<usize>,
+) {
+    if let Some(index) = index {
+        builder.push_line(format!("<output number=\"{index}\">"));
+    }
+
     let Some(output) = output.as_object() else {
-        let mut lines = Vec::new();
         push_tag_block(
-            &mut lines,
+            builder,
             "output",
             &serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string()),
         );
-        return lines;
+        if index.is_some() {
+            builder.push_line("</output>");
+        }
+        return;
     };
 
     let mut keys = output.keys().cloned().collect::<Vec<_>>();
     keys.sort_by(|left, right| output_field_order(left).cmp(&output_field_order(right)));
 
-    let mut lines = Vec::new();
     for key in keys {
         let value = output.get(&key).expect("output field should exist");
-        push_tag_block(&mut lines, &key, &render_tag_value(value));
+        render_output_field(builder, &key, value);
     }
-    lines
+
+    if index.is_some() {
+        builder.push_line("</output>");
+    }
 }
 
 fn output_field_order(key: &str) -> (usize, &str) {
@@ -649,18 +729,162 @@ fn render_tag_value(value: &serde_json::Value) -> String {
     }
 }
 
-fn push_tag_block(lines: &mut Vec<String>, tag: &str, content: &str) {
-    if !content.contains('\n') {
-        lines.push(format!("<{tag}>{content}</{tag}>"));
+fn render_output_field(builder: &mut NotebookRenderBuilder, key: &str, value: &serde_json::Value) {
+    if key == "data" {
+        render_output_data(builder, value);
         return;
     }
 
-    lines.push(format!("<{tag}>"));
+    let content = render_output_field_value(key, value);
+    push_tag_block(builder, key, &content);
+}
+
+fn render_output_data(builder: &mut NotebookRenderBuilder, value: &serde_json::Value) {
+    let Some(object) = value.as_object() else {
+        push_tag_block(builder, "data", &render_tag_value(value));
+        return;
+    };
+
+    let mut rendered = serde_json::Map::new();
+    let mut media = Vec::new();
+    for (mime_type, item) in object {
+        let (rendered_value, mut embedded_media) = render_output_data_item(mime_type, item);
+        rendered.insert(mime_type.clone(), rendered_value);
+        media.append(&mut embedded_media);
+    }
+
+    push_tag_block(
+        builder,
+        "data",
+        &serde_json::to_string_pretty(&serde_json::Value::Object(rendered))
+            .unwrap_or_else(|_| value.to_string()),
+    );
+
+    for item in media {
+        builder.push_image(item.data, item.mime_type);
+    }
+}
+
+fn render_output_data_item(
+    mime_type: &str,
+    value: &serde_json::Value,
+) -> (serde_json::Value, Vec<NotebookEmbeddedMedia>) {
+    if mime_type.starts_with("image/") {
+        let encoded = value_as_lines(Some(value)).join("");
+        let normalized = encoded
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        if let Ok(data) = BASE64_STANDARD.decode(normalized.as_bytes()) {
+            if !data.is_empty() {
+                return (
+                    serde_json::Value::String(format!("[{mime_type} output rendered below]")),
+                    vec![NotebookEmbeddedMedia {
+                        data,
+                        mime_type: mime_type.to_string(),
+                    }],
+                );
+            }
+        }
+    }
+
+    if notebook_mime_type_is_textual(mime_type) {
+        let rendered = render_tag_value(value);
+        if rendered.chars().count() > NOTEBOOK_OUTPUT_TEXT_CHAR_LIMIT {
+            return (
+                serde_json::Value::String(truncate_notebook_output_text(rendered)),
+                Vec::new(),
+            );
+        }
+    }
+
+    (value.clone(), Vec::new())
+}
+
+fn render_output_field_value(key: &str, value: &serde_json::Value) -> String {
+    let content = render_tag_value(value);
+    if notebook_output_field_is_textual(key) {
+        truncate_notebook_output_text(content)
+    } else {
+        content
+    }
+}
+
+fn notebook_output_field_is_textual(key: &str) -> bool {
+    matches!(key, "text" | "traceback" | "evalue")
+}
+
+fn notebook_mime_type_is_textual(mime_type: &str) -> bool {
+    mime_type.starts_with("text/")
+        || mime_type == "application/json"
+        || mime_type.ends_with("+json")
+        || mime_type.ends_with("+xml")
+        || mime_type == "application/javascript"
+}
+
+fn truncate_notebook_output_text(content: String) -> String {
+    let total_chars = content.chars().count();
+    if total_chars <= NOTEBOOK_OUTPUT_TEXT_CHAR_LIMIT {
+        return content;
+    }
+
+    let truncated = content
+        .chars()
+        .take(NOTEBOOK_OUTPUT_TEXT_CHAR_LIMIT)
+        .collect::<String>();
+    let omitted_chars = total_chars - NOTEBOOK_OUTPUT_TEXT_CHAR_LIMIT;
+
+    format!(
+        "{truncated}\n\n{NOTEBOOK_OUTPUT_TRUNCATION_NOTICE}\nOmitted {omitted_chars} characters."
+    )
+}
+
+fn push_tag_block(builder: &mut NotebookRenderBuilder, tag: &str, content: &str) {
+    if !content.contains('\n') {
+        builder.push_line(format!("<{tag}>{content}</{tag}>"));
+        return;
+    }
+
+    builder.push_line(format!("<{tag}>"));
     let block = content.strip_suffix('\n').unwrap_or(content);
     if !block.is_empty() {
-        lines.extend(block.lines().map(ToString::to_string));
+        for line in block.lines() {
+            builder.push_line(line.to_string());
+        }
     }
-    lines.push(format!("</{tag}>"));
+    builder.push_line(format!("</{tag}>"));
+}
+
+fn push_text_part(parts: &mut Vec<ReadContent>, content: ReadContent) {
+    match content {
+        ReadContent::Text(text) if text.is_empty() => {}
+        ReadContent::Text(text) => match parts.last_mut() {
+            Some(ReadContent::Text(existing)) => existing.push_str(&text),
+            _ => parts.push(ReadContent::Text(text)),
+        },
+        other => parts.push(other),
+    }
+}
+
+fn normalize_read_contents(parts: Vec<ReadContent>) -> ReadFileOutput {
+    if parts.is_empty() {
+        return ReadFileOutput::Text(String::new());
+    }
+
+    if parts.len() == 1 {
+        match parts
+            .into_iter()
+            .next()
+            .expect("one content item should exist")
+        {
+            ReadContent::Text(text) => ReadFileOutput::Text(text),
+            ReadContent::Image { data, mime_type } => {
+                ReadFileOutput::Contents(vec![ReadContent::Image { data, mime_type }])
+            }
+        }
+    } else {
+        ReadFileOutput::Contents(parts)
+    }
 }
 
 async fn read_pdf_text(path: &Path, pages: Option<&str>) -> Result<String> {
@@ -1362,6 +1586,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lopdf::{
         Document, Object, Stream,
         content::{Content, Operation},
@@ -1518,6 +1743,114 @@ mod tests {
         assert!(text.contains("<output_type>stream</output_type>"));
         assert!(text.contains("<text>"));
         assert!(!text.contains("Cell 0 [markdown]"));
+    }
+
+    #[tokio::test]
+    async fn read_truncates_long_notebook_output_text_without_truncating_source() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("truncated.ipynb");
+        let source = format!("print({:?})\n", "source stays whole".repeat(500));
+        let long_output = "output block ".repeat(800);
+        let notebook = serde_json::json!({
+            "cells": [
+                {
+                    "id": "cell-a",
+                    "cell_type": "code",
+                    "metadata": {},
+                    "execution_count": 1,
+                    "outputs": [
+                        {
+                            "output_type": "stream",
+                            "name": "stdout",
+                            "text": [long_output]
+                        }
+                    ],
+                    "source": [source]
+                }
+            ],
+            "metadata": {
+                "language_info": { "name": "python" }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        tokio::fs::write(&file, serde_json::to_string_pretty(&notebook).unwrap())
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let content = service.read_file(&file, None, None, None).await.unwrap();
+
+        let ReadFileOutput::Text(text) = content else {
+            panic!("expected text output");
+        };
+        assert!(text.contains("source stays whole"));
+        assert!(text.contains("output truncated for readability"));
+        assert!(text.contains("Use Bash with cat and jq"));
+        assert!(!text.contains(&"output block ".repeat(700)));
+    }
+
+    #[tokio::test]
+    async fn read_returns_embedded_notebook_images_as_image_content() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("image-output.ipynb");
+        let png_bytes = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        let notebook = serde_json::json!({
+            "cells": [
+                {
+                    "id": "cell-a",
+                    "cell_type": "code",
+                    "metadata": {},
+                    "execution_count": 1,
+                    "outputs": [
+                        {
+                            "output_type": "display_data",
+                            "data": {
+                                "image/png": STANDARD.encode(&png_bytes),
+                                "text/plain": ["figure preview\n"]
+                            },
+                            "metadata": {}
+                        }
+                    ],
+                    "source": ["display(fig)\n"]
+                }
+            ],
+            "metadata": {
+                "language_info": { "name": "python" }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        tokio::fs::write(&file, serde_json::to_string_pretty(&notebook).unwrap())
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let content = service.read_file(&file, None, None, None).await.unwrap();
+
+        let ReadFileOutput::Contents(parts) = content else {
+            panic!("expected mixed notebook content");
+        };
+        assert!(parts.iter().any(|part| matches!(
+            part,
+            super::ReadContent::Image { data, mime_type }
+                if data == &png_bytes && mime_type == "image/png"
+        )));
+
+        let joined_text = parts
+            .iter()
+            .filter_map(|part| match part {
+                super::ReadContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(joined_text.contains("[image/png output rendered below]"));
+        assert!(joined_text.contains("figure preview"));
+        assert!(!joined_text.contains(&STANDARD.encode(&png_bytes)));
     }
 
     #[tokio::test]
