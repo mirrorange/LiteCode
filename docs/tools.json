@@ -716,14 +716,6 @@
           "notebook_path": {
             "description": "The path to the notebook file",
             "type": "string"
-          },
-          "original_file": {
-            "description": "The original notebook content before modification",
-            "type": "string"
-          },
-          "updated_file": {
-            "description": "The updated notebook content after modification",
-            "type": "string"
           }
         },
         "required": [
@@ -731,9 +723,7 @@
           "cell_type",
           "language",
           "edit_mode",
-          "notebook_path",
-          "original_file",
-          "updated_file"
+          "notebook_path"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false

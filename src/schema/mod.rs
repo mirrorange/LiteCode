@@ -435,10 +435,6 @@ pub struct NotebookEditOutput {
     pub error: Option<String>,
     /// The path to the notebook file
     pub notebook_path: String,
-    /// The original notebook content before modification
-    pub original_file: String,
-    /// The updated notebook content after modification
-    pub updated_file: String,
 }
 
 const fn default_true() -> bool {

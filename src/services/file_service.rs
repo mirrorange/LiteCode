@@ -358,9 +358,9 @@ impl FileService {
             )));
         }
 
-        let original_file = tokio::fs::read_to_string(&path).await?;
+        let original_notebook = tokio::fs::read_to_string(&path).await?;
         let mut notebook =
-            serde_json::from_str::<serde_json::Value>(&original_file).map_err(|error| {
+            serde_json::from_str::<serde_json::Value>(&original_notebook).map_err(|error| {
                 LiteCodeError::invalid_input(format!("Invalid notebook JSON: {error}"))
             })?;
         let language = notebook_language(&notebook);
@@ -401,8 +401,6 @@ impl FileService {
                     edit_mode: NotebookEditMode::Replace,
                     error: None,
                     notebook_path: path.display().to_string(),
-                    original_file: original_file.clone(),
-                    updated_file: String::new(),
                 }
             }
             NotebookEditMode::Insert => {
@@ -423,8 +421,6 @@ impl FileService {
                     edit_mode: NotebookEditMode::Insert,
                     error: None,
                     notebook_path: path.display().to_string(),
-                    original_file: original_file.clone(),
-                    updated_file: String::new(),
                 }
             }
             NotebookEditMode::Delete => {
@@ -448,21 +444,16 @@ impl FileService {
                     edit_mode: NotebookEditMode::Delete,
                     error: None,
                     notebook_path: path.display().to_string(),
-                    original_file: original_file.clone(),
-                    updated_file: String::new(),
                 }
             }
         };
 
-        let updated_file = serde_json::to_string_pretty(&notebook)
+        let updated_notebook = serde_json::to_string_pretty(&notebook)
             .map_err(|error| LiteCodeError::internal(error.to_string()))?;
-        tokio::fs::write(&path, &updated_file).await?;
+        tokio::fs::write(&path, &updated_notebook).await?;
         self.mark_read(&path);
 
-        Ok(NotebookEditOutput {
-            updated_file,
-            ..output
-        })
+        Ok(output)
     }
 
     fn resolve_search_root(&self, path: Option<&str>) -> Result<PathBuf> {
@@ -1844,6 +1835,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replaced.language, "python");
+        let replaced_json = serde_json::to_value(&replaced).unwrap();
+        assert!(replaced_json.get("original_file").is_none());
+        assert!(replaced_json.get("updated_file").is_none());
 
         let inserted = service
             .edit_notebook(NotebookEditInput {
