@@ -234,7 +234,6 @@ impl FileService {
         files.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
 
         let total = files.len();
-        let truncated = total > 100;
         let filenames = files
             .into_iter()
             .take(100)
@@ -244,7 +243,6 @@ impl FileService {
         Ok(GlobOutput {
             num_files: total,
             filenames,
-            truncated,
         })
     }
 
@@ -282,14 +280,10 @@ impl FileService {
             GrepOutputMode::FilesWithMatches => {
                 let filenames = apply_window(&results.matched_files, offset, limit);
                 GrepOutput {
-                    mode: Some(mode),
                     num_files: filenames.len(),
                     filenames,
                     content: None,
-                    num_lines: None,
                     num_matches: Some(total_matches),
-                    applied_limit: Some(limit),
-                    applied_offset: Some(offset),
                 }
             }
             GrepOutputMode::Count => {
@@ -304,14 +298,10 @@ impl FileService {
                     .filter_map(|entry| entry.split_once(':').map(|(path, _)| path.to_string()))
                     .collect::<Vec<_>>();
                 GrepOutput {
-                    mode: Some(mode),
                     num_files: filenames.len(),
                     filenames,
                     content: Some(windowed.join("\n")),
-                    num_lines: Some(windowed.len()),
                     num_matches: Some(total_matches),
-                    applied_limit: Some(limit),
-                    applied_offset: Some(offset),
                 }
             }
             GrepOutputMode::Content => {
@@ -323,7 +313,6 @@ impl FileService {
                     .into_iter()
                     .collect::<Vec<_>>();
                 GrepOutput {
-                    mode: Some(mode),
                     num_files: filenames.len(),
                     filenames,
                     content: Some(
@@ -333,10 +322,7 @@ impl FileService {
                             .collect::<Vec<_>>()
                             .join("\n"),
                     ),
-                    num_lines: Some(windowed.len()),
                     num_matches: Some(total_matches),
-                    applied_limit: Some(limit),
-                    applied_offset: Some(offset),
                 }
             }
         })
@@ -1898,6 +1884,21 @@ mod tests {
 
         assert_eq!(output.num_files, 1);
         assert!(output.filenames[0].ends_with("lib.rs"));
+
+        let output_json = serde_json::to_value(&output).unwrap();
+        let keys = output_json
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            ["filenames", "numFiles"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
     }
 
     #[tokio::test]
@@ -1935,8 +1936,23 @@ mod tests {
         assert!(
             output
                 .content
+                .as_deref()
                 .unwrap()
                 .contains("main.rs:2:let needle = 1;")
+        );
+        let output_json = serde_json::to_value(&output).unwrap();
+        let keys = output_json
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            ["content", "filenames", "numFiles", "numMatches"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
         );
     }
 

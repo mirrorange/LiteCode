@@ -123,15 +123,11 @@ pub struct GlobOutput {
     pub num_files: usize,
     /// Array of file paths that match the pattern
     pub filenames: Vec<String>,
-    /// Whether results were truncated (limited to 100 files)
-    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GrepOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<GrepOutputMode>,
     /// Total number of files found
     #[serde(rename = "numFiles")]
     pub num_files: usize,
@@ -139,18 +135,9 @@ pub struct GrepOutput {
     pub filenames: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Number of lines returned in content
-    #[serde(rename = "numLines", skip_serializing_if = "Option::is_none")]
-    pub num_lines: Option<usize>,
     /// Total number of matches found
     #[serde(rename = "numMatches", skip_serializing_if = "Option::is_none")]
     pub num_matches: Option<usize>,
-    /// The effective head_limit applied
-    #[serde(rename = "appliedLimit", skip_serializing_if = "Option::is_none")]
-    pub applied_limit: Option<usize>,
-    /// The effective offset applied
-    #[serde(rename = "appliedOffset", skip_serializing_if = "Option::is_none")]
-    pub applied_offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]

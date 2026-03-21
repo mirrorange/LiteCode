@@ -119,16 +119,11 @@
             "items": {
               "type": "string"
             }
-          },
-          "truncated": {
-            "description": "Whether results were truncated (limited to 100 files)",
-            "type": "boolean"
           }
         },
         "required": [
           "numFiles",
-          "filenames",
-          "truncated"
+          "filenames"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
@@ -211,14 +206,6 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "mode": {
-            "type": "string",
-            "enum": [
-              "content",
-              "files_with_matches",
-              "count"
-            ]
-          },
           "numFiles": {
             "type": "number"
           },
@@ -231,16 +218,7 @@
           "content": {
             "type": "string"
           },
-          "numLines": {
-            "type": "number"
-          },
           "numMatches": {
-            "type": "number"
-          },
-          "appliedLimit": {
-            "type": "number"
-          },
-          "appliedOffset": {
             "type": "number"
           }
         },
