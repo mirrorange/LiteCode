@@ -165,9 +165,7 @@ impl FileService {
         tokio::fs::write(&path, &input.content).await?;
         self.mark_read(&path);
 
-        Ok(WriteOutput {
-            content: input.content,
-        })
+        Ok(WriteOutput { success: true })
     }
 
     pub async fn edit_file(&self, input: EditInput) -> Result<EditOutput> {
@@ -209,7 +207,7 @@ impl FileService {
         tokio::fs::write(&path, &updated).await?;
         self.mark_read(&path);
 
-        Ok(EditOutput { content: updated })
+        Ok(EditOutput { success: true })
     }
 
     pub fn glob_files(&self, input: GlobInput) -> Result<GlobOutput> {
@@ -372,7 +370,7 @@ impl FileService {
                 normalize_cell_shape(cell, cell_type);
 
                 NotebookEditOutput {
-                    content: Some(input.new_source.clone()),
+                    success: true,
                     cell_id: None,
                 }
             }
@@ -387,7 +385,7 @@ impl FileService {
                 cells.insert(index, new_cell);
 
                 NotebookEditOutput {
-                    content: Some(input.new_source.clone()),
+                    success: true,
                     cell_id: Some(cell_id),
                 }
             }
@@ -401,7 +399,7 @@ impl FileService {
                 cells.remove(index);
 
                 NotebookEditOutput {
-                    content: None,
+                    success: true,
                     cell_id: None,
                 }
             }
@@ -1831,7 +1829,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.content, "during after");
+        assert!(output.success);
         assert_eq!(
             tokio::fs::read_to_string(&file).await.unwrap(),
             "during after"
@@ -1839,11 +1837,11 @@ mod tests {
 
         let output_json = serde_json::to_value(&output).unwrap();
         assert_eq!(output_json.as_object().unwrap().len(), 1);
-        assert!(output_json.get("content").is_some());
+        assert_eq!(output_json.get("success"), Some(&serde_json::Value::Bool(true)));
     }
 
     #[tokio::test]
-    async fn write_returns_only_latest_content() {
+    async fn write_returns_success_only() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("sample.txt");
 
@@ -1858,12 +1856,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.content, "after");
+        assert!(output.success);
         assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "after");
 
         let output_json = serde_json::to_value(&output).unwrap();
         assert_eq!(output_json.as_object().unwrap().len(), 1);
-        assert!(output_json.get("content").is_some());
+        assert_eq!(output_json.get("success"), Some(&serde_json::Value::Bool(true)));
     }
 
     #[test]
@@ -2142,10 +2140,14 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(replaced.content.as_deref(), Some("print('bye')\n"));
+        assert!(replaced.success);
         let replaced_json = serde_json::to_value(&replaced).unwrap();
         assert_eq!(replaced_json.as_object().unwrap().len(), 1);
-        assert!(replaced_json.get("content").is_some());
+        assert_eq!(
+            replaced_json.get("success"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(replaced_json.get("cellId").is_none());
 
         let inserted = service
             .edit_notebook(NotebookEditInput {
@@ -2158,10 +2160,44 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(inserted.content.as_deref(), Some("# title\n"));
+        assert!(inserted.success);
+        assert!(inserted.cell_id.is_some());
         let inserted_json = serde_json::to_value(&inserted).unwrap();
         assert_eq!(inserted_json.as_object().unwrap().len(), 2);
-        let inserted_id = inserted.cell_id.clone().unwrap();
+        assert_eq!(
+            inserted_json.get("success"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let inserted_id = inserted
+            .cell_id
+            .clone()
+            .expect("insert should return inserted cell id");
+        assert_eq!(
+            inserted_json.get("cellId"),
+            Some(&serde_json::Value::String(inserted_id.clone()))
+        );
+
+        let notebook_after_insert = serde_json::from_str::<serde_json::Value>(
+            &tokio::fs::read_to_string(&file).await.unwrap(),
+        )
+        .unwrap();
+        let notebook_inserted_id = notebook_after_insert
+            .get("cells")
+            .and_then(|value| value.as_array())
+            .and_then(|cells| {
+                cells.iter().find(|cell| {
+                    cell.get("source")
+                        .and_then(|value| value.as_array())
+                        .and_then(|source| source.first())
+                        .and_then(|value| value.as_str())
+                        == Some("# title\n")
+                })
+            })
+            .and_then(|cell| cell.get("id"))
+            .and_then(|value| value.as_str())
+            .unwrap()
+            .to_string();
+        assert_eq!(notebook_inserted_id, inserted_id);
 
         let deleted = service
             .edit_notebook(NotebookEditInput {
@@ -2174,9 +2210,14 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(deleted.content.is_none());
+        assert!(deleted.success);
         let deleted_json = serde_json::to_value(&deleted).unwrap();
-        assert!(deleted_json.as_object().unwrap().is_empty());
+        assert_eq!(deleted_json.as_object().unwrap().len(), 1);
+        assert_eq!(
+            deleted_json.get("success"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(deleted_json.get("cellId").is_none());
 
         let notebook = serde_json::from_str::<serde_json::Value>(
             &tokio::fs::read_to_string(&file).await.unwrap(),
@@ -2244,7 +2285,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(replaced.content.as_deref(), Some("print('bye')\n"));
+        assert!(replaced.success);
         assert!(replaced.cell_id.is_none());
 
         let inserted = service
@@ -2258,8 +2299,8 @@ mod tests {
             })
             .await
             .unwrap();
+        assert!(inserted.success);
         assert!(inserted.cell_id.is_some());
-        assert_eq!(inserted.content.as_deref(), Some("## middle\n"));
 
         let deleted = service
             .edit_notebook(NotebookEditInput {
@@ -2272,8 +2313,8 @@ mod tests {
             })
             .await
             .unwrap();
+        assert!(deleted.success);
         assert!(deleted.cell_id.is_none());
-        assert!(deleted.content.is_none());
 
         let notebook = serde_json::from_str::<serde_json::Value>(
             &tokio::fs::read_to_string(&file).await.unwrap(),

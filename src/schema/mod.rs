@@ -104,15 +104,15 @@ pub struct GrepInput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteOutput {
-    /// The latest file content after the write
-    pub content: String,
+    /// Whether the write operation succeeded
+    pub success: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditOutput {
-    /// The latest file content after the edit
-    pub content: String,
+    /// Whether the edit operation succeeded
+    pub success: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -261,9 +261,8 @@ pub struct NotebookEditInput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NotebookEditOutput {
-    /// The latest cell content after the edit
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    /// Whether the notebook edit operation succeeded
+    pub success: bool,
     /// The ID of a newly inserted cell when one is created
     #[serde(rename = "cellId", skip_serializing_if = "Option::is_none")]
     pub cell_id: Option<String>,

@@ -295,13 +295,13 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "content": {
-            "description": "The latest file content after the edit",
-            "type": "string"
+          "success": {
+            "description": "Whether the edit operation succeeded",
+            "type": "boolean"
           }
         },
         "required": [
-          "content"
+          "success"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
@@ -332,13 +332,13 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "content": {
-            "description": "The latest file content after the write",
-            "type": "string"
+          "success": {
+            "description": "Whether the write operation succeeded",
+            "type": "boolean"
           }
         },
         "required": [
-          "content"
+          "success"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
@@ -395,15 +395,18 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "content": {
-            "description": "The latest cell content after the edit",
-            "type": "string"
+          "success": {
+            "description": "Whether the notebook edit operation succeeded",
+            "type": "boolean"
           },
           "cellId": {
             "description": "The ID of a newly inserted cell when one is created",
             "type": "string"
           }
         },
+        "required": [
+          "success"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       }

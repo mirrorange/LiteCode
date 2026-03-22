@@ -89,7 +89,7 @@ Writes (or overwrites) a file on the local filesystem.
 | `file_path` | string | Yes | Absolute path to write to |
 | `content` | string | Yes | Content to write |
 
-**Output fields**: `type` (create/update), `filePath`, `content`, `structuredPatch`, `originalFile` (required); plus optional `gitDiff`.
+**Output fields**: `success` (required); `cellId` (insert mode only).
 
 **Key behaviors**:
 
@@ -114,6 +114,8 @@ Performs exact string replacements in files.
 - File must be read at least once before editing (enforced)
 - Fails if `old_string` matches multiple locations and `replace_all` is false
 - Preserves exact indentation
+
+**Output fields**: `success` (required).
 
 ---
 
@@ -175,6 +177,8 @@ Edits cells in Jupyter notebooks (.ipynb).
 | `edit_mode` | enum | No | `replace` (default) | `insert` | `delete` |
 
 If both `cell_id` and `cell_number` are provided, they must resolve to the same cell, or the same insertion point in `insert` mode.
+
+**Output fields**: `success` (required).
 
 ---
 
