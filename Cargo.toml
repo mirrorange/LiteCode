@@ -2,6 +2,21 @@
 name = "litecode"
 version = "0.1.0"
 edition = "2024"
+authors = ["orange"]
+description = "An ultra-lightweight Coding MCP server built with Rust"
+repository = "https://github.com/mirrorange/LiteCode"
+homepage = "https://github.com/mirrorange/LiteCode"
+license = "MIT"
+readme = "README.md"
+keywords = ["mcp", "coding", "llm", "tools", "server"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = [
+    ".github/",
+    "docs/",
+    "playground/",
+    "target/",
+    "AGENTS.md",
+]
 
 [dependencies]
 axum = "0.8.8"
