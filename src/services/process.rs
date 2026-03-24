@@ -319,7 +319,7 @@ mod tests {
             "stdout should include the command marker, got {:?}",
             output.stdout
         );
-        assert_eq!(service.working_dir(), nested);
+        assert_paths_equivalent(&service.working_dir(), &nested);
 
         let keys = object_keys(&to_value(&output).unwrap());
         assert_eq!(keys, vec!["interrupted", "stderr", "stdout"]);
@@ -412,6 +412,34 @@ mod tests {
             .collect::<Vec<_>>();
         keys.sort();
         keys
+    }
+
+    fn assert_paths_equivalent(actual: &Path, expected: &Path) {
+        assert_eq!(
+            normalize_path_for_assertion(actual),
+            normalize_path_for_assertion(expected),
+            "working directory should resolve to the requested path.\nactual: {:?}\nexpected: {:?}",
+            actual,
+            expected
+        );
+    }
+
+    fn normalize_path_for_assertion(path: &Path) -> std::path::PathBuf {
+        let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+        #[cfg(windows)]
+        {
+            let raw = normalized.to_string_lossy();
+            return raw
+                .strip_prefix(r"\\?\")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(normalized);
+        }
+
+        #[cfg(not(windows))]
+        {
+            normalized
+        }
     }
 
     #[test]
