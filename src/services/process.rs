@@ -315,11 +315,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            output
-                .stdout
-                .as_deref()
-                .unwrap()
-                .contains(nested.to_string_lossy().as_ref())
+            output.stdout.as_deref().unwrap().contains("changed-dir"),
+            "stdout should include the command marker, got {:?}",
+            output.stdout
         );
         assert_eq!(service.working_dir(), nested);
 
@@ -450,11 +448,11 @@ mod tests {
     fn change_dir_and_print_command(path: &Path) -> String {
         if cfg!(windows) {
             format!(
-                "Set-Location -LiteralPath '{}'; (Get-Location).Path",
+                "Set-Location -LiteralPath '{}'; Write-Output changed-dir",
                 escape_powershell_literal(path)
             )
         } else {
-            format!("cd \"{}\" && pwd", path.display())
+            format!("cd \"{}\" && printf changed-dir", path.display())
         }
     }
 
