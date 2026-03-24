@@ -1837,7 +1837,10 @@ mod tests {
 
         let output_json = serde_json::to_value(&output).unwrap();
         assert_eq!(output_json.as_object().unwrap().len(), 1);
-        assert_eq!(output_json.get("success"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            output_json.get("success"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 
     #[tokio::test]
@@ -1861,7 +1864,10 @@ mod tests {
 
         let output_json = serde_json::to_value(&output).unwrap();
         assert_eq!(output_json.as_object().unwrap().len(), 1);
-        assert_eq!(output_json.get("success"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            output_json.get("success"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 
     #[test]
