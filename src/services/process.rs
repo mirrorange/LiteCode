@@ -16,6 +16,12 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 const PWD_MARKER: &str = "__LITECODE_PWD__:";
 
+#[derive(Debug, PartialEq, Eq)]
+struct ShellCommand {
+    program: String,
+    args: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProcessService {
     working_dir: Arc<Mutex<PathBuf>>,
@@ -116,11 +122,10 @@ impl ProcessService {
     }
 
     fn spawn_shell(&self, command: &str) -> Result<tokio::process::Child> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let mut process = Command::new(shell);
+        let shell = shell_command(command);
+        let mut process = Command::new(&shell.program);
         process
-            .arg("-lc")
-            .arg(wrap_command(command))
+            .args(&shell.args)
             .current_dir(self.working_dir())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -203,9 +208,60 @@ async fn wait_for_child(
     })
 }
 
-fn wrap_command(command: &str) -> String {
+fn shell_command(command: &str) -> ShellCommand {
+    #[cfg(windows)]
+    {
+        windows_shell_command(command)
+    }
+
+    #[cfg(not(windows))]
+    {
+        unix_shell_command(command)
+    }
+}
+
+#[cfg(any(not(windows), test))]
+fn unix_shell_command(command: &str) -> ShellCommand {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    ShellCommand {
+        program: shell,
+        args: vec!["-lc".to_string(), wrap_unix_command(command)],
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_shell_command(command: &str) -> ShellCommand {
+    ShellCommand {
+        program: windows_powershell().to_string(),
+        args: vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            wrap_windows_command(command),
+        ],
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_powershell() -> &'static str {
+    "powershell.exe"
+}
+
+fn wrap_unix_command(command: &str) -> String {
     format!(
         "{command}; __litecode_status=$?; printf '\\n{PWD_MARKER}%s' \"$PWD\"; exit $__litecode_status"
+    )
+}
+
+#[cfg(any(windows, test))]
+fn wrap_windows_command(command: &str) -> String {
+    format!(
+        "$global:LASTEXITCODE = 0; & {{ {command} }}; \
+         $__litecode_status = if ($?) {{ $global:LASTEXITCODE }} elseif ($global:LASTEXITCODE -ne 0) {{ $global:LASTEXITCODE }} else {{ 1 }}; \
+         [Console]::Out.WriteLine(); \
+         [Console]::Out.Write(\"{PWD_MARKER}$((Get-Location).Path)\"); \
+         exit $__litecode_status"
     )
 }
 
@@ -222,7 +278,10 @@ fn extract_working_dir(stdout: &str) -> (String, Option<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        path::Path,
+        sync::{Arc, Mutex},
+    };
 
     use serde_json::{Value, to_value};
     use tempfile::tempdir;
@@ -232,7 +291,7 @@ mod tests {
         services::task_manager::TaskManager,
     };
 
-    use super::ProcessService;
+    use super::{ProcessService, unix_shell_command, windows_shell_command, wrap_windows_command};
 
     #[tokio::test]
     async fn bash_updates_working_directory() {
@@ -245,7 +304,7 @@ mod tests {
         let output = service
             .bash(
                 BashInput {
-                    command: format!("cd \"{}\" && pwd", nested.display()),
+                    command: change_dir_and_print_command(&nested),
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: Some(false),
@@ -277,7 +336,7 @@ mod tests {
         let output = service
             .bash(
                 BashInput {
-                    command: "sleep 1 && echo ready".to_string(),
+                    command: sleep_then_echo_command(1, "ready"),
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: Some(true),
@@ -316,7 +375,7 @@ mod tests {
         let output = service
             .bash(
                 BashInput {
-                    command: "sleep 30".to_string(),
+                    command: sleep_command(30),
                     timeout: Some(60_000),
                     description: Some("Long sleep".to_string()),
                     run_in_background: Some(true),
@@ -355,5 +414,67 @@ mod tests {
             .collect::<Vec<_>>();
         keys.sort();
         keys
+    }
+
+    #[test]
+    fn unix_shell_command_uses_login_shell_and_pwd_marker() {
+        let command = unix_shell_command("pwd");
+
+        assert_eq!(
+            command.program,
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+        );
+        assert_eq!(command.args[0], "-lc");
+        assert!(command.args[1].contains("printf '\\n__LITECODE_PWD__:%s' \"$PWD\""));
+    }
+
+    #[test]
+    fn windows_shell_command_uses_powershell_and_pwd_marker() {
+        let command = windows_shell_command("pwd");
+
+        assert_eq!(command.program, "powershell.exe");
+        assert_eq!(
+            command.args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                wrap_windows_command("pwd"),
+            ]
+        );
+        assert!(command.args[4].contains("__LITECODE_PWD__:"));
+        assert!(command.args[4].contains("Get-Location"));
+    }
+
+    fn change_dir_and_print_command(path: &Path) -> String {
+        if cfg!(windows) {
+            format!(
+                "Set-Location -LiteralPath '{}'; (Get-Location).Path",
+                escape_powershell_literal(path)
+            )
+        } else {
+            format!("cd \"{}\" && pwd", path.display())
+        }
+    }
+
+    fn sleep_then_echo_command(seconds: u64, message: &str) -> String {
+        if cfg!(windows) {
+            format!("Start-Sleep -Seconds {seconds}; Write-Output {message}")
+        } else {
+            format!("sleep {seconds} && echo {message}")
+        }
+    }
+
+    fn sleep_command(seconds: u64) -> String {
+        if cfg!(windows) {
+            format!("Start-Sleep -Seconds {seconds}")
+        } else {
+            format!("sleep {seconds}")
+        }
+    }
+
+    fn escape_powershell_literal(path: &Path) -> String {
+        path.display().to_string().replace('\'', "''")
     }
 }
