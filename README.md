@@ -5,6 +5,7 @@
 **An ultra-lightweight Coding MCP server built with Rust**
 
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust)](https://www.rust-lang.org/)
+[![CI](https://github.com/mirrorange/LiteCode/actions/workflows/ci.yml/badge.svg)](https://github.com/mirrorange/LiteCode/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-green)](https://modelcontextprotocol.io/)
 
@@ -49,12 +50,26 @@ LiteCode ships with **9 core tools**:
 #### Build from source
 
 ```bash
-git clone https://github.com/anthropics/litecode.git
-cd litecode
+git clone https://github.com/mirrorange/LiteCode.git
+cd LiteCode
 cargo build --release
 ```
 
 The compiled binary will be at `target/release/litecode`.
+
+#### Install via cargo
+
+After the crate is published to crates.io, you can install it directly with:
+
+```bash
+cargo install litecode
+```
+
+If you want a specific release:
+
+```bash
+cargo install litecode --version 0.1.0
+```
 
 ### 🚀 Usage
 
@@ -95,6 +110,13 @@ litecode/
 ### 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
+
+### 🚢 Release Process
+
+- Every push and every pull request runs GitHub Actions CI on Linux, Windows, Intel macOS, and Apple Silicon macOS.
+- Creating a tag like `v0.1.0` triggers the release workflow.
+- The release workflow verifies that the tag matches `Cargo.toml`, builds release binaries for each platform, uploads archives to GitHub Releases, and publishes the crate to crates.io.
+- To enable crates publishing, add the repository secret `CARGO_REGISTRY_TOKEN` with a crates.io API token that has publish permission.
 
 ### 📄 License
 
@@ -137,12 +159,26 @@ LiteCode 提供 **9 个核心工具**：
 #### 从源码构建
 
 ```bash
-git clone https://github.com/anthropics/litecode.git
-cd litecode
+git clone https://github.com/mirrorange/LiteCode.git
+cd LiteCode
 cargo build --release
 ```
 
 编译后的二进制文件位于 `target/release/litecode`。
+
+#### 通过 cargo 安装
+
+crate 发布到 crates.io 后，可以直接安装：
+
+```bash
+cargo install litecode
+```
+
+如果要安装指定版本：
+
+```bash
+cargo install litecode --version 0.1.0
+```
 
 ### 🚀 使用方法
 
@@ -183,6 +219,13 @@ litecode/
 ### 🤝 参与贡献
 
 欢迎贡献代码！请随时提交 Issue 和 Pull Request。
+
+### 🚢 发布流程
+
+- 每次推送和每次提交 Pull Request 时，GitHub Actions 都会在 Linux、Windows、Intel macOS 和 Apple Silicon macOS 上执行构建与测试。
+- 创建类似 `v0.1.0` 的 tag 会触发发布工作流。
+- 发布工作流会校验 tag 与 `Cargo.toml` 中的版本一致，为各平台构建发布包，上传到 GitHub Releases，并把 crate 发布到 crates.io。
+- 要启用 crates 发布，请在仓库中配置 `CARGO_REGISTRY_TOKEN` secret，并填入具有发布权限的 crates.io API Token。
 
 ### 📄 许可证
 
