@@ -303,10 +303,15 @@
           "success": {
             "description": "Whether the edit operation succeeded",
             "type": "boolean"
+          },
+          "message": {
+            "description": "Summary of what was edited",
+            "type": "string"
           }
         },
         "required": [
-          "success"
+          "success",
+          "message"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
@@ -345,10 +350,15 @@
           "success": {
             "description": "Whether the write operation succeeded",
             "type": "boolean"
+          },
+          "message": {
+            "description": "Summary of what was written",
+            "type": "string"
           }
         },
         "required": [
-          "success"
+          "success",
+          "message"
         ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
