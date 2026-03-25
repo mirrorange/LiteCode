@@ -136,6 +136,8 @@ impl FileService {
 
     pub async fn write_file(&self, input: WriteInput) -> Result<WriteOutput> {
         let path = self.require_absolute_file(Path::new(&input.file_path))?;
+        let content =
+            maybe_decode_unicode_escapes(input.decode_unicode_escapes, &input.content, "content")?;
         let original = match tokio::fs::read_to_string(&path).await {
             Ok(content) => Some(content),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -162,14 +164,25 @@ impl FileService {
             )));
         }
 
-        tokio::fs::write(&path, &input.content).await?;
+        tokio::fs::write(&path, &content).await?;
         self.mark_read(&path);
 
         Ok(WriteOutput { success: true })
     }
 
     pub async fn edit_file(&self, input: EditInput) -> Result<EditOutput> {
-        if input.old_string == input.new_string {
+        let old_string = maybe_decode_unicode_escapes(
+            input.decode_unicode_escapes,
+            &input.old_string,
+            "old_string",
+        )?;
+        let new_string = maybe_decode_unicode_escapes(
+            input.decode_unicode_escapes,
+            &input.new_string,
+            "new_string",
+        )?;
+
+        if old_string == new_string {
             return Err(LiteCodeError::invalid_input(
                 "new_string must differ from old_string.",
             ));
@@ -184,7 +197,7 @@ impl FileService {
         }
 
         let original = tokio::fs::read_to_string(&path).await?;
-        let occurrences = original.match_indices(&input.old_string).count();
+        let occurrences = original.match_indices(&old_string).count();
         if occurrences == 0 {
             return Err(LiteCodeError::invalid_input(format!(
                 "old_string was not found in {}.",
@@ -199,9 +212,9 @@ impl FileService {
         }
 
         let updated = if input.replace_all {
-            original.replace(&input.old_string, &input.new_string)
+            original.replace(&old_string, &new_string)
         } else {
-            original.replacen(&input.old_string, &input.new_string, 1)
+            original.replacen(&old_string, &new_string, 1)
         };
 
         tokio::fs::write(&path, &updated).await?;
@@ -498,6 +511,102 @@ impl FileService {
         }
         Ok(path.to_path_buf())
     }
+}
+
+fn maybe_decode_unicode_escapes(enabled: bool, value: &str, field_name: &str) -> Result<String> {
+    if !enabled {
+        return Ok(value.to_string());
+    }
+
+    decode_unicode_escapes(value).map_err(|message| {
+        LiteCodeError::invalid_input(format!("Invalid Unicode escape in {field_name}: {message}"))
+    })
+}
+
+fn decode_unicode_escapes(input: &str) -> std::result::Result<String, String> {
+    let mut output = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() && bytes[index + 1] == b'u' {
+            let (code_point, next_index) = parse_unicode_code_point(input, index)?;
+            let character = char::from_u32(code_point)
+                .ok_or_else(|| format!("code point U+{code_point:04X} is invalid"))?;
+            output.push(character);
+            index = next_index;
+            continue;
+        }
+
+        let character = input[index..]
+            .chars()
+            .next()
+            .ok_or_else(|| "encountered invalid UTF-8 boundary".to_string())?;
+        output.push(character);
+        index += character.len_utf8();
+    }
+
+    Ok(output)
+}
+
+fn parse_unicode_code_point(
+    input: &str,
+    start: usize,
+) -> std::result::Result<(u32, usize), String> {
+    let (first, mut next_index) = parse_unicode_escape_unit(input, start)?;
+
+    if !(0xD800..=0xDFFF).contains(&first) {
+        return Ok((u32::from(first), next_index));
+    }
+
+    if (0xDC00..=0xDFFF).contains(&first) {
+        return Err(format!(
+            "unexpected low surrogate \\u{first:04X} at byte {start}"
+        ));
+    }
+
+    if !input[next_index..].starts_with("\\u") {
+        return Err(format!(
+            "high surrogate \\u{first:04X} at byte {start} must be followed by a low surrogate"
+        ));
+    }
+
+    let (second, following_index) = parse_unicode_escape_unit(input, next_index)?;
+    if !(0xDC00..=0xDFFF).contains(&second) {
+        return Err(format!(
+            "high surrogate \\u{first:04X} at byte {start} must be followed by a low surrogate, found \\u{second:04X}"
+        ));
+    }
+
+    next_index = following_index;
+    let high = u32::from(first) - 0xD800;
+    let low = u32::from(second) - 0xDC00;
+    let code_point = 0x10000 + ((high << 10) | low);
+
+    Ok((code_point, next_index))
+}
+
+fn parse_unicode_escape_unit(
+    input: &str,
+    start: usize,
+) -> std::result::Result<(u16, usize), String> {
+    let bytes = input.as_bytes();
+    let end = start + 6;
+    if end > bytes.len() {
+        return Err(format!(
+            "truncated escape at byte {start}; expected four hexadecimal digits after \\u"
+        ));
+    }
+
+    if bytes[start] != b'\\' || bytes[start + 1] != b'u' {
+        return Err(format!("expected Unicode escape at byte {start}"));
+    }
+
+    let hex = &input[start + 2..end];
+    let value = u16::from_str_radix(hex, 16)
+        .map_err(|_| format!("invalid escape \\u{hex} at byte {start}"))?;
+
+    Ok((value, end))
 }
 
 const NOTEBOOK_OUTPUT_TEXT_CHAR_LIMIT: usize = 4_000;
@@ -1802,6 +1911,7 @@ mod tests {
             .write_file(WriteInput {
                 file_path: file.display().to_string(),
                 content: "after".to_string(),
+                decode_unicode_escapes: false,
             })
             .await
             .unwrap_err();
@@ -1825,6 +1935,7 @@ mod tests {
                 old_string: "before".to_string(),
                 new_string: "during".to_string(),
                 replace_all: false,
+                decode_unicode_escapes: false,
             })
             .await
             .unwrap();
@@ -1855,6 +1966,7 @@ mod tests {
             .write_file(WriteInput {
                 file_path: file.display().to_string(),
                 content: "after".to_string(),
+                decode_unicode_escapes: false,
             })
             .await
             .unwrap();
@@ -1867,6 +1979,74 @@ mod tests {
         assert_eq!(
             output_json.get("success"),
             Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn write_decodes_unicode_escapes_when_enabled() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        service
+            .write_file(WriteInput {
+                file_path: file.display().to_string(),
+                content: "\\u4F60\\u597D \\uD83D\\uDE00".to_string(),
+                decode_unicode_escapes: true,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "你好 😀");
+    }
+
+    #[tokio::test]
+    async fn edit_decodes_unicode_escapes_when_enabled() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        tokio::fs::write(&file, "你好").await.unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        service.read_file(&file, None, None, None).await.unwrap();
+        service
+            .edit_file(EditInput {
+                file_path: file.display().to_string(),
+                old_string: "\\u4F60\\u597D".to_string(),
+                new_string: "\\u4E16\\u754C".to_string(),
+                replace_all: false,
+                decode_unicode_escapes: true,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "世界");
+    }
+
+    #[tokio::test]
+    async fn write_rejects_invalid_unicode_escape_when_enabled() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        let error = service
+            .write_file(WriteInput {
+                file_path: file.display().to_string(),
+                content: "\\u12ZZ".to_string(),
+                decode_unicode_escapes: true,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid Unicode escape in content")
         );
     }
 

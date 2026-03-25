@@ -282,6 +282,11 @@
             "description": "Replace all occurrences of old_string (default false)",
             "default": false,
             "type": "boolean"
+          },
+          "decode_unicode_escapes": {
+            "description": "Decode Unicode escape sequences like \\u4F60 in old_string and new_string (default false)",
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [
@@ -320,6 +325,11 @@
           "content": {
             "description": "The content to write to the file",
             "type": "string"
+          },
+          "decode_unicode_escapes": {
+            "description": "Decode Unicode escape sequences like \\u4F60 before writing (default false)",
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [

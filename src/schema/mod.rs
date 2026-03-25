@@ -21,6 +21,9 @@ pub struct WriteInput {
     pub file_path: String,
     /// The content to write to the file
     pub content: String,
+    /// Decode Unicode escape sequences like \u4F60 before writing (default false)
+    #[serde(default)]
+    pub decode_unicode_escapes: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -35,6 +38,9 @@ pub struct EditInput {
     /// Replace all occurrences of old_string (default false)
     #[serde(default)]
     pub replace_all: bool,
+    /// Decode Unicode escape sequences like \u4F60 in old_string and new_string (default false)
+    #[serde(default)]
+    pub decode_unicode_escapes: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
