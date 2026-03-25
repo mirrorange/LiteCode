@@ -167,7 +167,20 @@ impl FileService {
         tokio::fs::write(&path, &content).await?;
         self.mark_read(&path);
 
-        Ok(WriteOutput { success: true })
+        let action = if original.is_some() {
+            "overwrote existing file"
+        } else {
+            "created new file"
+        };
+
+        Ok(WriteOutput {
+            success: true,
+            message: format!(
+                "Wrote {} ({action}, {} bytes).",
+                path.display(),
+                content.len()
+            ),
+        })
     }
 
     pub async fn edit_file(&self, input: EditInput) -> Result<EditOutput> {
@@ -220,7 +233,22 @@ impl FileService {
         tokio::fs::write(&path, &updated).await?;
         self.mark_read(&path);
 
-        Ok(EditOutput { success: true })
+        let replacements = if input.replace_all { occurrences } else { 1 };
+        let location_label = if replacements == 1 {
+            "location"
+        } else {
+            "locations"
+        };
+
+        Ok(EditOutput {
+            success: true,
+            message: format!(
+                "Edited {} (replaced {} {}).",
+                path.display(),
+                replacements,
+                location_label
+            ),
+        })
     }
 
     pub fn glob_files(&self, input: GlobInput) -> Result<GlobOutput> {
@@ -1942,20 +1970,28 @@ mod tests {
 
         assert!(output.success);
         assert_eq!(
+            output.message,
+            format!("Edited {} (replaced 1 location).", file.display())
+        );
+        assert_eq!(
             tokio::fs::read_to_string(&file).await.unwrap(),
             "during after"
         );
 
         let output_json = serde_json::to_value(&output).unwrap();
-        assert_eq!(output_json.as_object().unwrap().len(), 1);
+        assert_eq!(output_json.as_object().unwrap().len(), 2);
         assert_eq!(
             output_json.get("success"),
             Some(&serde_json::Value::Bool(true))
         );
+        assert_eq!(
+            output_json.get("message"),
+            Some(&serde_json::Value::String(output.message.clone()))
+        );
     }
 
     #[tokio::test]
-    async fn write_returns_success_only() {
+    async fn write_reports_created_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("sample.txt");
 
@@ -1972,14 +2008,86 @@ mod tests {
             .unwrap();
 
         assert!(output.success);
+        assert_eq!(
+            output.message,
+            format!("Wrote {} (created new file, 5 bytes).", file.display())
+        );
         assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "after");
 
         let output_json = serde_json::to_value(&output).unwrap();
-        assert_eq!(output_json.as_object().unwrap().len(), 1);
+        assert_eq!(output_json.as_object().unwrap().len(), 2);
         assert_eq!(
             output_json.get("success"),
             Some(&serde_json::Value::Bool(true))
         );
+        assert_eq!(
+            output_json.get("message"),
+            Some(&serde_json::Value::String(output.message.clone()))
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_reports_all_replacements() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        tokio::fs::write(&file, "before and before again")
+            .await
+            .unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        service.read_file(&file, None, None, None).await.unwrap();
+        let output = service
+            .edit_file(EditInput {
+                file_path: file.display().to_string(),
+                old_string: "before".to_string(),
+                new_string: "after".to_string(),
+                replace_all: true,
+                decode_unicode_escapes: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(output.success);
+        assert_eq!(
+            output.message,
+            format!("Edited {} (replaced 2 locations).", file.display())
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&file).await.unwrap(),
+            "after and after again"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_reports_overwritten_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        tokio::fs::write(&file, "before").await.unwrap();
+
+        let service = FileService::new(std::sync::Arc::new(std::sync::Mutex::new(
+            dir.path().to_path_buf(),
+        )));
+        service.read_file(&file, None, None, None).await.unwrap();
+        let output = service
+            .write_file(WriteInput {
+                file_path: file.display().to_string(),
+                content: "after!".to_string(),
+                decode_unicode_escapes: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(output.success);
+        assert_eq!(
+            output.message,
+            format!(
+                "Wrote {} (overwrote existing file, 6 bytes).",
+                file.display()
+            )
+        );
+        assert_eq!(tokio::fs::read_to_string(&file).await.unwrap(), "after!");
     }
 
     #[tokio::test]

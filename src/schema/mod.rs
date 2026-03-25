@@ -112,6 +112,8 @@ pub struct GrepInput {
 pub struct WriteOutput {
     /// Whether the write operation succeeded
     pub success: bool,
+    /// Summary of what was written
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -119,6 +121,8 @@ pub struct WriteOutput {
 pub struct EditOutput {
     /// Whether the edit operation succeeded
     pub success: bool,
+    /// Summary of what was edited
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
