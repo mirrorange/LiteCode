@@ -6,7 +6,7 @@ use std::{
 use rmcp::{
     ServerHandler,
     handler::server::router::tool::ToolRouter,
-    model::{Implementation, ServerCapabilities, ServerInfo, TasksCapability},
+    model::{Implementation, ServerCapabilities, ServerInfo},
     tool_handler,
 };
 
@@ -67,20 +67,20 @@ impl LiteCodeServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for LiteCodeServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_tasks_with(TasksCapability::server_default())
-                .build(),
-        )
-        .with_server_info(
-            Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-                .with_title("LiteCode")
-                .with_description("Ultra-lightweight coding MCP server built with Rust."),
-        )
-        .with_instructions(
-            "LiteCode exposes a focused set of coding tools over STDIO or Streamable HTTP.",
-        )
+        // Only advertise what this handler actually implements. Advertising the
+        // MCP `tasks` capability made task aware clients invoke tools as tasks
+        // and call `tasks/*`, which this server can only answer with protocol
+        // errors. Background work is exposed through the Bash, TaskOutput and
+        // TaskStop tools instead.
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+                    .with_title("LiteCode")
+                    .with_description("Ultra-lightweight coding MCP server built with Rust."),
+            )
+            .with_instructions(
+                "LiteCode exposes a focused set of coding tools over STDIO or Streamable HTTP.",
+            )
     }
 }
 
@@ -95,17 +95,16 @@ mod tests {
     use rmcp::ServerHandler;
 
     #[test]
-    fn advertises_tool_and_task_capabilities() {
+    fn advertises_only_implemented_capabilities() {
         let server = LiteCodeServer::new(PathBuf::from("."));
         let info = server.get_info();
 
         assert_eq!(info.server_info.name, "litecode");
         assert_eq!(info.capabilities.tools, Some(ToolsCapability::default()));
-
-        let tasks = info.capabilities.tasks.expect("tasks capability");
-        assert!(tasks.supports_list());
-        assert!(tasks.supports_cancel());
-        assert!(tasks.supports_tools_call());
+        assert!(
+            info.capabilities.tasks.is_none(),
+            "tasks/* requests are not implemented, so the capability must stay unadvertised"
+        );
     }
 
     #[test]

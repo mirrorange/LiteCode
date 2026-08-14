@@ -89,7 +89,8 @@ impl TaskManager {
     }
 
     pub async fn finish_task(&self, task_id: &str, completion: TaskCompletion) {
-        if let Some(task) = self.inner.tasks.read().await.get(task_id).cloned() {
+        // Release the registry lock before awaiting the task state write lock.
+        if let Ok(task) = self.get_task(task_id).await {
             *task.state.write().await = completion;
             task.notify.notify_waiters();
         }
@@ -99,11 +100,17 @@ impl TaskManager {
         let task = self.get_task(&input.task_id).await?;
 
         if input.block {
-            let is_complete = { task.state.read().await.completed };
-            if !is_complete {
+            // Subscribe before inspecting the state: `notify_waiters` only wakes
+            // waiters that are already registered, so a task finishing between
+            // the check and the subscription would leave this call waiting for a
+            // wakeup that never arrives.
+            let mut finished = std::pin::pin!(task.notify.notified());
+            finished.as_mut().enable();
+
+            if !task.state.read().await.completed {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(input.timeout.min(600_000)),
-                    task.notify.notified(),
+                    finished,
                 )
                 .await;
             }

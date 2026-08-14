@@ -25,7 +25,11 @@ pub async fn run(cli: cli::Cli) -> Result<()> {
 }
 
 fn init_tracing() {
+    // The stdio transport carries JSON-RPC over stdout, so logs must never be
+    // written there: a single log line corrupts the message stream and the
+    // connected client fails to parse the responses that follow it.
     let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_target(false)
         .without_time()
         .try_init();
